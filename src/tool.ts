@@ -1,8 +1,8 @@
-import type { McpServer } from '@modelcontextprotocol/server';
+import type { McpServer, ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import { classifyError, emitToolEvent } from './events.js';
-import { InputValidationError } from './errors.js';
+import { InputValidationError, RequestCancelledError } from './errors.js';
 
 export const detailSchema = z
   .enum(['compact', 'full'])
@@ -19,6 +19,30 @@ export function assertDateRange(startDate?: string, endDate?: string): void {
 
 export function invalidInput(message: string): never {
   throw new InputValidationError(message);
+}
+
+export function requestCancelled(context: ServerContext): boolean {
+  return context.mcpReq.signal.aborted;
+}
+
+export function throwIfCancelled(context: ServerContext, message = 'Request was cancelled'): void {
+  if (requestCancelled(context)) throw new RequestCancelledError(message);
+}
+
+export async function reportProgress(
+  context: ServerContext,
+  progress: number,
+  total: number,
+  message: string,
+): Promise<void> {
+  const progressToken = context.mcpReq._meta?.progressToken;
+  if (progressToken === undefined) return;
+  await context.mcpReq
+    .notify({
+      method: 'notifications/progress',
+      params: { progressToken, progress, total, message },
+    })
+    .catch(() => undefined);
 }
 
 const pageSchema = z.object({
@@ -49,6 +73,7 @@ interface PageMetadata {
 export interface ToolPayload {
   readonly data: unknown;
   readonly summary: string;
+  readonly cancelled?: boolean;
   readonly page?: PageMetadata;
   readonly change?: {
     readonly id: string;
@@ -110,7 +135,7 @@ interface ToolSpec<Shape extends z.ZodRawShape> {
 export function addTool<Shape extends z.ZodRawShape>(
   server: McpServer,
   spec: ToolSpec<Shape>,
-  handler: (args: z.output<z.ZodObject<Shape>>) => Promise<ToolPayload>,
+  handler: (args: z.output<z.ZodObject<Shape>>, context: ServerContext) => Promise<ToolPayload>,
 ): void {
   server.registerTool(
     spec.name,
@@ -121,10 +146,10 @@ export function addTool<Shape extends z.ZodRawShape>(
       outputSchema: toolOutputSchema,
       annotations: spec.hints,
     },
-    async (args) => {
+    async (args, context) => {
       const startedAt = performance.now();
       try {
-        const result = await handler(args);
+        const result = await handler(args, context);
         const output = {
           data: result.data,
           meta: {
@@ -144,7 +169,7 @@ export function addTool<Shape extends z.ZodRawShape>(
         };
         emitToolEvent({
           tool: spec.name,
-          outcome: 'success',
+          outcome: result.cancelled ? 'cancelled' : 'success',
           durationMs: performance.now() - startedAt,
           readOnly: spec.hints.readOnlyHint,
           destructive: spec.hints.destructiveHint,
@@ -161,7 +186,7 @@ export function addTool<Shape extends z.ZodRawShape>(
       } catch (error) {
         emitToolEvent({
           tool: spec.name,
-          outcome: 'error',
+          outcome: error instanceof RequestCancelledError ? 'cancelled' : 'error',
           durationMs: performance.now() - startedAt,
           readOnly: spec.hints.readOnlyHint,
           destructive: spec.hints.destructiveHint,

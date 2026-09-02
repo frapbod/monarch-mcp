@@ -1,10 +1,10 @@
 import { appendFileSync } from 'node:fs';
 
-import { AuthenticationError, InputValidationError } from './errors.js';
+import { AuthenticationError, InputValidationError, RequestCancelledError } from './errors.js';
 
 interface ToolEvent {
   readonly tool: string;
-  readonly outcome: 'success' | 'error';
+  readonly outcome: 'success' | 'error' | 'cancelled';
   readonly durationMs: number;
   readonly readOnly: boolean;
   readonly destructive: boolean;
@@ -18,6 +18,7 @@ interface ToolEvent {
 export function classifyError(error: unknown): string {
   if (error instanceof InputValidationError) return 'validation';
   if (error instanceof AuthenticationError) return 'authentication';
+  if (error instanceof RequestCancelledError) return 'cancelled';
   const value = error as { name?: unknown; statusCode?: unknown } | null;
   const status = Number(value?.statusCode);
   if (status === 401 || status === 403) return 'authentication';
