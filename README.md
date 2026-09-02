@@ -28,6 +28,7 @@ node dist/server.js
 - `MONARCH_SESSION_DIR` — token-cache directory; defaults to `~/.monarch-mcp`
 - `MONARCH_TIMEOUT_SECONDS` — upstream request timeout; defaults to `30`
 - `MONARCH_MCP_EVENT_LOG` — optional JSONL path for privacy-safe tool outcome and latency events
+- `MONARCH_CHANGE_DIR` — durable change journal; defaults to `MONARCH_SESSION_DIR/changes`
 
 The image is built with `make image`; its stdio entrypoint is the server.
 
@@ -51,21 +52,39 @@ The image is built with `make image`; its stdio entrypoint is the server.
 
 ### Transactions
 
-- `get_transactions` — complete filters and explicit offset pagination
+- `get_transactions` — complete filters, including review state, and explicit offset pagination
 - `get_transactions_summary` — aggregate totals, averages, counts, and date bounds
 - `get_transaction`, `get_transaction_splits`
 - `get_transaction_categories`, `get_transaction_category_groups`
 - `get_transaction_tags`
-- `create_transaction`, `update_transaction`, `delete_transaction`
+- `create_transaction`, `update_transaction`, `bulk_update_transactions`, `delete_transaction`
 - `set_transaction_splits`, `set_transaction_tags`
 - `create_transaction_tag`, `delete_transaction_tag`
 - `create_transaction_category`, `delete_transaction_category`
+- `get_transaction_rules`, `preview_transaction_rule`
+- `create_transaction_rule`, `update_transaction_rule`, `delete_transaction_rule`
 
 ### Planning
 
-- `get_budgets`, `set_budget_amount`
+- `get_budgets`, `get_goals`, `set_budget_amount`
 - `get_cashflow`, `get_cashflow_summary`
-- `get_recurring_transactions`
+- `get_recurring_transactions`, `update_recurring_merchant`
+
+### Change history
+
+- `get_change_history` — inspect change IDs, affected counts, status, and saved inverse operations
+- `undo_change` — idempotently reverse a journaled change; this is not a redo facility
+
+Transaction edits, bulk review work, recurring corrections, and rule changes are
+journaled before the upstream write as atomic mode-0600 records. The local
+`chg_<UUID>` identifies that private record; it is not a Monarch object ID.
+Completed results include their `change_id` and affected count, and ambiguous
+responses retain an `uncertain` journal entry. Before undo, state guards detect
+newer edits and require `force=true` rather than silently overwriting them.
+Retroactive rule application snapshots matching transactions before the rule
+runs, including their tags and splits. If Monarch's reported applied count
+differs from the previewed set, the change is explicitly marked as requiring
+manual review rather than claiming an unsafe automatic undo.
 
 `get_transactions` provides the client's paged and all-transactions behavior
 without an unbounded MCP result. `delete_transaction_category` provides the

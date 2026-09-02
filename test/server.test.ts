@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 
 import { createServer } from '../src/server.js';
+import { FileChangeStore } from '../src/changes.js';
 import type { MonarchAccess, MonarchClient } from '../src/session.js';
 
 const account = {
@@ -84,7 +88,8 @@ async function withClient(
   callback: (client: Client) => Promise<void>,
   mode: 'auto' | 'legacy' = 'auto',
 ): Promise<void> {
-  const handler = createMcpHandler(() => createServer(access));
+  const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-server-'));
+  const handler = createMcpHandler(() => createServer(access, new FileChangeStore(directory)));
   const transport = new StreamableHTTPClientTransport(new URL('http://test.local/mcp'), {
     fetch: (url, init) => handler.fetch(new Request(url, init)),
   });
@@ -98,13 +103,14 @@ async function withClient(
   } finally {
     await client.close();
     await handler.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 
 test('serves the complete tool surface over legacy MCP', async () => {
   await withClient(async (client) => {
     assert.equal(client.getProtocolEra(), 'legacy');
-    assert.equal((await client.listTools()).tools.length, 36);
+    assert.equal((await client.listTools()).tools.length, 46);
     const result = await client.callTool({
       name: 'get_accounts',
       arguments: { detail: 'compact' },
@@ -116,15 +122,19 @@ test('serves the complete tool surface over legacy MCP', async () => {
 test('advertises a complete, accurately annotated tool surface over modern MCP', async () => {
   await withClient(async (client) => {
     assert.equal(client.getProtocolEra(), 'modern');
+    assert.match(client.getInstructions() ?? '', /durable local change_id/);
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'bulk_update_transactions',
       'create_manual_account',
       'create_transaction',
       'create_transaction_category',
+      'create_transaction_rule',
       'create_transaction_tag',
       'delete_account',
       'delete_transaction',
       'delete_transaction_category',
+      'delete_transaction_rule',
       'delete_transaction_tag',
       'get_account_history',
       'get_account_holdings',
@@ -134,6 +144,8 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
       'get_budgets',
       'get_cashflow',
       'get_cashflow_summary',
+      'get_change_history',
+      'get_goals',
       'get_institutions',
       'get_net_worth_history',
       'get_recent_account_balances',
@@ -143,16 +155,21 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
       'get_transaction',
       'get_transaction_categories',
       'get_transaction_category_groups',
+      'get_transaction_rules',
       'get_transaction_splits',
       'get_transaction_tags',
       'get_transactions',
       'get_transactions_summary',
+      'preview_transaction_rule',
       'refresh_accounts',
       'set_budget_amount',
       'set_transaction_splits',
       'set_transaction_tags',
+      'undo_change',
       'update_account',
+      'update_recurring_merchant',
       'update_transaction',
+      'update_transaction_rule',
       'upload_account_balance_history',
     ]);
 
@@ -169,24 +186,30 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
       .filter((tool) => tool.annotations?.destructiveHint)
       .map((tool) => tool.name)
       .sort();
-    assert.equal(readOnly.length, 21);
+    assert.equal(readOnly.length, 25);
     assert.deepEqual(additive, [
       'create_manual_account',
       'create_transaction',
       'create_transaction_category',
+      'create_transaction_rule',
       'create_transaction_tag',
       'refresh_accounts',
     ]);
     assert.deepEqual(destructive, [
+      'bulk_update_transactions',
       'delete_account',
       'delete_transaction',
       'delete_transaction_category',
+      'delete_transaction_rule',
       'delete_transaction_tag',
       'set_budget_amount',
       'set_transaction_splits',
       'set_transaction_tags',
+      'undo_change',
       'update_account',
+      'update_recurring_merchant',
       'update_transaction',
+      'update_transaction_rule',
       'upload_account_balance_history',
     ]);
     assert.deepEqual(
@@ -198,6 +221,7 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
         'create_manual_account',
         'create_transaction',
         'create_transaction_category',
+        'create_transaction_rule',
         'create_transaction_tag',
       ],
     );
@@ -266,10 +290,12 @@ test('maps account balance history uploads exactly once', async () => {
       arguments: { account_id: 'account-123', csv_content: csvContent },
     });
     const output = result.structuredContent as {
-      data: { account_id: string; uploaded: boolean };
+      data: { account_id: string; uploaded: boolean; change_id: string };
     };
     assert.deepEqual(uploadedBalanceHistory, [{ accountId: 'account-123', csvContent }]);
-    assert.deepEqual(output.data, { account_id: 'account-123', uploaded: true });
+    assert.equal(output.data.account_id, 'account-123');
+    assert.equal(output.data.uploaded, true);
+    assert.match(output.data.change_id, /^chg_/);
   });
 });
 
