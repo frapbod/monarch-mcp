@@ -16,9 +16,11 @@ test('accepts credential authentication and a custom timeout', () => {
     MONARCH_PASSWORD: 'secret',
     MONARCH_MFA_SECRET: 'totp',
     MONARCH_TIMEOUT_SECONDS: '45',
+    HOME: '/home/kai',
   });
   assert.equal(config.email, 'kai@example.com');
   assert.equal(config.mfaSecret, 'totp');
+  assert.equal(config.sessionFile, '/home/kai/.monarch-mcp/session.json');
   assert.equal(config.timeoutSeconds, 45);
 });
 

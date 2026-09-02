@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export interface RuntimeConfig {
@@ -29,7 +30,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     );
   }
 
-  const sessionDir = env.MONARCH_SESSION_DIR?.trim() || join(process.cwd(), '.mm');
+  const sessionDir =
+    env.MONARCH_SESSION_DIR?.trim() || join(env.HOME?.trim() || homedir(), '.monarch-mcp');
   return {
     ...(email ? { email } : {}),
     ...(password ? { password } : {}),

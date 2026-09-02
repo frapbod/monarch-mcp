@@ -1,17 +1,12 @@
 SHELL := /bin/bash
 
-.PHONY: build test test-race typecheck lint format format-check generate check image clean
+.PHONY: build test typecheck lint format format-check check image clean
 
 build:
 	npm run build
 
 test:
 	npm test
-
-# JavaScript has no race detector. Running the suite concurrently catches shared
-# singleton and authentication-state mistakes that are the relevant analogue.
-test-race:
-	npm run test:race
 
 typecheck:
 	npm run typecheck
@@ -25,10 +20,7 @@ format:
 format-check:
 	npm run format:check
 
-generate:
-	@true
-
-check: format-check lint typecheck test test-race build
+check: format-check lint typecheck test build
 
 image:
 	@set -a; source ./versions.env; set +a; \

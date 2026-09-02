@@ -3,9 +3,17 @@ import * as z from 'zod/v4';
 
 import { compactTransaction } from '../projections.js';
 import type { MonarchAccess } from '../session.js';
-import { CREATE, READ_ONLY, REMOVE, UPDATE, addTool, detailSchema } from '../tool.js';
+import {
+  CREATE,
+  READ_ONLY,
+  REMOVE,
+  UPDATE,
+  addTool,
+  assertDateRange,
+  dateSchema,
+  detailSchema,
+} from '../tool.js';
 
-const date = z.iso.date().describe('Date in YYYY-MM-DD format');
 const transactionId = z.string().min(1).describe('Monarch transaction ID');
 const categoryId = z.string().min(1).describe('Monarch category ID');
 
@@ -20,8 +28,8 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       inputSchema: z.object({
         limit: z.number().int().min(1).max(500).default(100),
         offset: z.number().int().min(0).default(0),
-        start_date: date.optional(),
-        end_date: date.optional(),
+        start_date: dateSchema.optional(),
+        end_date: dateSchema.optional(),
         search: z.string().optional(),
         category_ids: z.array(categoryId).optional(),
         account_ids: z.array(z.string().min(1)).optional(),
@@ -38,6 +46,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: READ_ONLY,
     },
     async (args) => {
+      assertDateRange(args.start_date, args.end_date);
       const response = await session.read((client) =>
         client.getTransactions({
           limit: args.limit,
@@ -78,6 +87,21 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
           next_offset: nextOffset < total ? nextOffset : null,
         },
       };
+    },
+  );
+
+  addTool(
+    server,
+    {
+      name: 'get_transactions_summary',
+      title: 'Get transaction summary',
+      description: 'Get aggregate transaction totals, averages, counts, and date bounds.',
+      inputSchema: z.object({}),
+      hints: READ_ONLY,
+    },
+    async () => {
+      const data = await session.read((client) => client.getTransactionsSummary());
+      return { data, summary: 'Retrieved aggregate transaction summary.' };
     },
   );
 
@@ -163,7 +187,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       title: 'Create transaction',
       description: 'Create a manual transaction in an account.',
       inputSchema: z.object({
-        date,
+        date: dateSchema,
         account_id: z.string().min(1),
         amount: z.number(),
         merchant_name: z.string().min(1),
@@ -202,7 +226,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
         merchant_name: z.string().min(1).optional(),
         goal_id: z.string().min(1).optional(),
         amount: z.number().optional(),
-        date: date.optional(),
+        date: dateSchema.optional(),
         notes: z.string().optional(),
         hidden_from_reports: z.boolean().optional(),
         needs_review: z.boolean().optional(),
@@ -338,7 +362,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
         group_id: z.string().min(1),
         name: z.string().min(1),
         icon: z.string().optional(),
-        rollover_start_month: date.optional(),
+        rollover_start_month: dateSchema.optional(),
         rollover_enabled: z.boolean().default(false),
       }),
       hints: CREATE,

@@ -10,7 +10,7 @@ This repository is the first-party Monarch Money MCP used by Hermes.
 - Keep the server on the current stable TypeScript MCP SDK and serve both the
   modern and legacy protocol eras through `serveStdio`.
 - stdout is exclusively the MCP wire. Logs go to stderr.
-- Tool results always include both concise text and validated
+- Tool results always include both concise text and schema-declared
   `structuredContent`; compact projections must retain record IDs.
 - Read calls may retry transient failures. Mutations must not be replayed after
   an ambiguous upstream response.
@@ -24,11 +24,4 @@ This repository is the first-party Monarch Money MCP used by Hermes.
 - `src/tool.ts`: one MCP result and error contract
 - `src/tools/`: responsibility-focused tool registration
 - `src/server.ts`: factory and stdio lifecycle only
-
-## Deliberate TypeScript deviations from the Go bootstrap
-
-- `test-race` runs the suite concurrently because JavaScript has no race
-  detector.
-- `generate` is a no-op until the project owns generated artifacts.
-- Biome replaces golangci-lint and gofmt.
 

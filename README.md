@@ -1,26 +1,12 @@
 # Monarch MCP
 
-A small, first-party TypeScript MCP server for Monarch Money. It presents the
-unofficial Monarch API as predictable agent tools instead of leaking a raw
-GraphQL surface or inheriting another server's output quirks.
+A small TypeScript MCP server for Monarch Money, backed by
+`@hakimelek/monarchmoney`.
 
 The server uses the stable MCP TypeScript SDK v2 and serves both the modern
 `2026-07-28` protocol and older MCP clients over stdio. Every successful call
-returns concise text plus validated `structuredContent`. Paginated calls expose
+returns concise text plus a schema-declared `structuredContent` envelope. Paginated calls expose
 `total`, `returned`, and `next_offset`; compact records always keep their IDs.
-
-## What it combines
-
-- the maintained TypeScript Monarch client and its broad API coverage;
-- compact but evidence-complete results inspired by `jamiew/monarch-mcp`;
-- the broad read and bookkeeping surface found in `robcerda/monarch-mcp-server`;
-- explicit schemas, tests, and mutation clarity found in
-  `vargahis/monarch-mcp-server`;
-- MCP v2 tool schemas, structured output, annotations, and dual-era stdio from
-  the official TypeScript SDK.
-
-Only `@hakimelek/monarchmoney` is a runtime Monarch dependency. The other
-projects informed the interface; their server code is not vendored.
 
 ## Run
 
@@ -37,7 +23,7 @@ node dist/server.js
 
 `MONARCH_TOKEN` can replace the three credential variables. Optional settings:
 
-- `MONARCH_SESSION_DIR` — token-cache directory; defaults to `.mm`
+- `MONARCH_SESSION_DIR` — token-cache directory; defaults to `~/.monarch-mcp`
 - `MONARCH_TIMEOUT_SECONDS` — upstream request timeout; defaults to `30`
 
 The image is built with `make image`; its stdio entrypoint is the server.
@@ -58,10 +44,12 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `get_refresh_status` — whether a requested institution sync is still running
 - `refresh_accounts` — start a sync and, by default, wait and re-read the accounts
 - `create_manual_account`, `update_account`, `delete_account`
+- `upload_account_balance_history` — import CSV balances for a manual account
 
 ### Transactions
 
 - `get_transactions` — complete filters and explicit offset pagination
+- `get_transactions_summary` — aggregate totals, averages, counts, and date bounds
 - `get_transaction`, `get_transaction_splits`
 - `get_transaction_categories`, `get_transaction_category_groups`
 - `get_transaction_tags`
@@ -76,6 +64,11 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `get_cashflow`, `get_cashflow_summary`
 - `get_recurring_transactions`
 
+`get_transactions` provides the client's paged and all-transactions behavior
+without an unbounded MCP result. `delete_transaction_category` provides the
+client's single and batch-helper behavior one exact result at a time.
+Authentication, session, and timeout methods remain server internals.
+
 Mutation tools are not hidden behind a server-specific flag. Their MCP
 annotations accurately distinguish reads, updates, creates, and deletes so the
 host can apply its normal interaction policy without making the toolset less
@@ -87,8 +80,8 @@ useful.
 make check
 ```
 
-The check runs formatting, lint, strict type checking, behavior tests,
-concurrent state tests, and a production build. Live Monarch integration checks
+The check runs formatting, lint, strict type checking, behavior tests, and a
+production build. Live Monarch integration checks
 are performed during the Hermes image rollout because CI has no personal
 account credentials.
 
@@ -101,4 +94,3 @@ API. It is not affiliated with or endorsed by Monarch Money.
 ## License
 
 MIT
-

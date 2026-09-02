@@ -6,6 +6,14 @@ export const detailSchema = z
   .default('compact')
   .describe('compact keeps useful fields and every record ID; full returns the upstream payload');
 
+export const dateSchema = z.iso.date().describe('Date in YYYY-MM-DD format');
+
+export function assertDateRange(startDate?: string, endDate?: string): void {
+  if (Boolean(startDate) !== Boolean(endDate)) {
+    throw new Error('Supply both start_date and end_date, or omit both');
+  }
+}
+
 const pageSchema = z.object({
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),
@@ -14,7 +22,7 @@ const pageSchema = z.object({
   next_offset: z.number().int().nonnegative().nullable(),
 });
 
-export const toolOutputSchema = z.object({
+const toolOutputSchema = z.object({
   data: z.unknown(),
   meta: z.object({
     source: z.literal('monarch'),
@@ -23,7 +31,7 @@ export const toolOutputSchema = z.object({
   }),
 });
 
-export interface PageMetadata {
+interface PageMetadata {
   readonly limit: number;
   readonly offset: number;
   readonly returned: number;
@@ -109,7 +117,7 @@ export function addTool<Shape extends z.ZodRawShape>(
           content: [
             {
               type: 'text' as const,
-              text: `${result.summary}\n${JSON.stringify(output, null, 2)}`,
+              text: `${result.summary}\n${JSON.stringify(output)}`,
             },
           ],
           structuredContent: output,

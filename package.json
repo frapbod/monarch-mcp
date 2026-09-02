@@ -16,7 +16,6 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts",
-    "test:race": "node --import tsx --test --test-concurrency=8 test/**/*.test.ts",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",

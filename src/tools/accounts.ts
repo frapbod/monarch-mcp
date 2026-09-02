@@ -3,9 +3,8 @@ import * as z from 'zod/v4';
 
 import { compactAccount } from '../projections.js';
 import type { MonarchAccess } from '../session.js';
-import { CREATE, READ_ONLY, REMOVE, UPDATE, addTool, detailSchema } from '../tool.js';
+import { CREATE, READ_ONLY, REMOVE, UPDATE, addTool, dateSchema, detailSchema } from '../tool.js';
 
-const date = z.iso.date().describe('Date in YYYY-MM-DD format');
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
 
 export function registerAccountTools(server: McpServer, session: MonarchAccess): void {
@@ -69,7 +68,7 @@ export function registerAccountTools(server: McpServer, session: MonarchAccess):
       name: 'get_recent_account_balances',
       title: 'Get recent account balances',
       description: 'Get daily balance arrays for every account starting on a date.',
-      inputSchema: z.object({ start_date: date.optional() }),
+      inputSchema: z.object({ start_date: dateSchema.optional() }),
       hints: READ_ONLY,
     },
     async ({ start_date }) => {
@@ -86,8 +85,8 @@ export function registerAccountTools(server: McpServer, session: MonarchAccess):
       description:
         'Get daily aggregate balances across accounts, optionally filtered by account type.',
       inputSchema: z.object({
-        start_date: date.optional(),
-        end_date: date.optional(),
+        start_date: dateSchema.optional(),
+        end_date: dateSchema.optional(),
         account_type: z.string().min(1).optional(),
       }),
       hints: READ_ONLY,
@@ -114,7 +113,7 @@ export function registerAccountTools(server: McpServer, session: MonarchAccess):
       title: 'Get balances by account type',
       description: 'Get monthly or yearly balance snapshots grouped by account type.',
       inputSchema: z.object({
-        start_date: date,
+        start_date: dateSchema,
         timeframe: z.enum(['month', 'year']),
       }),
       hints: READ_ONLY,
@@ -326,6 +325,30 @@ export function registerAccountTools(server: McpServer, session: MonarchAccess):
         }),
       );
       return { data, summary: `Updated account ${account_id}.` };
+    },
+  );
+
+  addTool(
+    server,
+    {
+      name: 'upload_account_balance_history',
+      title: 'Upload account balance history',
+      description: 'Upload Monarch-format CSV balance history for one manual account.',
+      inputSchema: z.object({
+        account_id: accountId,
+        csv_content: z
+          .string()
+          .min(1)
+          .describe('CSV with unique, non-future dates and a Balance or Amount column'),
+      }),
+      hints: UPDATE,
+    },
+    async ({ account_id, csv_content }) => {
+      await session.write((client) => client.uploadAccountBalanceHistory(account_id, csv_content));
+      return {
+        data: { account_id, uploaded: true },
+        summary: `Uploaded balance history for account ${account_id}.`,
+      };
     },
   );
 
