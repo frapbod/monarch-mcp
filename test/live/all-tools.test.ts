@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const PREFIX = 'MCP-Test-';
+const NORMALIZED_PREFIX = PREFIX.toLocaleLowerCase();
 
 // biome-ignore lint/suspicious/noExplicitAny: Monarch's unsupported API has no stable response schema.
 type Data = Record<string, any>;
@@ -41,12 +42,16 @@ function transactionName(transaction: Data): string {
   return String(transaction.merchant?.name ?? '');
 }
 
+function testName(value: unknown): boolean {
+  return String(value ?? '')
+    .toLocaleLowerCase()
+    .startsWith(NORMALIZED_PREFIX);
+}
+
 async function sweep(client: Client): Promise<void> {
   const rules = (await call(client, 'get_transaction_rules')).transactionRules as Data[];
   for (const rule of rules.filter((item) =>
-    (item.merchantNameCriteria ?? []).some((criterion: Data) =>
-      String(criterion.value).startsWith(PREFIX),
-    ),
+    JSON.stringify(item).toLocaleLowerCase().includes(NORMALIZED_PREFIX),
   )) {
     await call(client, 'delete_transaction_rule', { rule_id: rule.id });
   }
@@ -58,25 +63,23 @@ async function sweep(client: Client): Promise<void> {
       detail: 'compact',
     })
   ).transactions as Data[];
-  for (const transaction of transactions.filter((item) =>
-    transactionName(item).startsWith(PREFIX),
-  )) {
+  for (const transaction of transactions.filter((item) => testName(transactionName(item)))) {
     await call(client, 'delete_transaction', { transaction_id: transaction.id });
   }
 
   const tags = (await call(client, 'get_transaction_tags')).tags as Data[];
-  for (const tag of tags.filter((item) => String(item.name).startsWith(PREFIX))) {
+  for (const tag of tags.filter((item) => testName(item.name))) {
     await call(client, 'delete_transaction_tag', { tag_id: tag.id });
   }
 
   const categories = (await call(client, 'get_transaction_categories')).categories as Data[];
-  for (const category of categories.filter((item) => String(item.name).startsWith(PREFIX))) {
+  for (const category of categories.filter((item) => testName(item.name))) {
     await call(client, 'set_budget_amount', { amount: 0, category_id: category.id });
     await call(client, 'delete_transaction_category', { category_id: category.id });
   }
 
   const accounts = (await call(client, 'get_accounts', { detail: 'compact' })).accounts as Data[];
-  for (const account of accounts.filter((item) => String(item.name).startsWith(PREFIX))) {
+  for (const account of accounts.filter((item) => testName(item.name))) {
     await call(client, 'delete_account', { account_id: account.id });
   }
 }
