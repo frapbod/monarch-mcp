@@ -8,6 +8,7 @@ import type { Account } from '@hakimelek/monarchmoney';
 import { budgetAmount } from '../budget-state.js';
 import type { AccountValues, ChangeGuard, ChangeStore, UndoStep } from '../changes.js';
 import { mapConcurrent } from '../concurrency.js';
+import { RequestCancelledError } from '../errors.js';
 import { ruleInputFromApi } from '../rule-state.js';
 import type { MonarchAccess, MonarchClient } from '../session.js';
 import {
@@ -85,7 +86,12 @@ async function undoAll(
   const pending = [...steps].reverse();
   let completed = 0;
   while (pending.length) {
-    throwIfCancelled(context, `Undo cancelled after ${completed} of ${steps.length} steps`);
+    if (requestCancelled(context)) {
+      throw new RequestCancelledError(
+        `Undo cancelled after ${completed} of ${steps.length} steps`,
+        completed,
+      );
+    }
     const next = pending.shift();
     if (!next) break;
     if (!independentTransactionUndo(next)) {
@@ -104,17 +110,27 @@ async function undoAll(
       const candidate = pending.shift();
       if (candidate) batch.push(candidate);
     }
-    await mapConcurrent(batch, 4, async (step) => {
-      throwIfCancelled(context, `Undo cancelled after ${completed} of ${steps.length} steps`);
-      await undo(client, step);
-      completed += 1;
-      await reportProgress(
-        context,
-        completed,
-        steps.length,
-        `Restored ${completed} of ${steps.length}`,
-      );
-    });
+    try {
+      await mapConcurrent(batch, 4, async (step) => {
+        if (requestCancelled(context)) throw new RequestCancelledError('Undo cancelled');
+        await undo(client, step);
+        completed += 1;
+        await reportProgress(
+          context,
+          completed,
+          steps.length,
+          `Restored ${completed} of ${steps.length}`,
+        );
+      });
+    } catch (error) {
+      if (error instanceof RequestCancelledError) {
+        throw new RequestCancelledError(
+          `Undo cancelled after ${completed} of ${steps.length} steps`,
+          completed,
+        );
+      }
+      throw error;
+    }
   }
 }
 
@@ -345,6 +361,12 @@ export function registerChangeTools(
           } catch {
             // The undoing record still captures the interrupted attempt.
           }
+        }
+        if (error instanceof RequestCancelledError && error.completedCount > 0) {
+          throw new RequestCancelledError(error.message, error.completedCount, {
+            id: change_id,
+            reversible: change.reversible,
+          });
         }
         throw error;
       }
