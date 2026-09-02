@@ -3,7 +3,16 @@ import * as z from 'zod/v4';
 
 import { compactAccount } from '../projections.js';
 import type { MonarchAccess } from '../session.js';
-import { CREATE, READ_ONLY, REMOVE, UPDATE, addTool, dateSchema, detailSchema } from '../tool.js';
+import {
+  ACTION,
+  CREATE,
+  READ_ONLY,
+  REMOVE,
+  UPDATE,
+  addTool,
+  dateSchema,
+  detailSchema,
+} from '../tool.js';
 
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
 
@@ -207,7 +216,7 @@ export function registerAccountTools(server: McpServer, session: MonarchAccess):
         timeout_seconds: z.number().int().min(10).max(600).default(300),
         poll_seconds: z.number().int().min(1).max(30).default(5),
       }),
-      hints: UPDATE,
+      hints: ACTION,
     },
     async ({ account_ids, wait, timeout_seconds, poll_seconds }) => {
       const before = await session.read((client) => client.getAccounts());

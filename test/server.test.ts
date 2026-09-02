@@ -104,7 +104,7 @@ async function withClient(
 test('serves the complete tool surface over legacy MCP', async () => {
   await withClient(async (client) => {
     assert.equal(client.getProtocolEra(), 'legacy');
-    assert.equal((await client.listTools()).tools.length, 35);
+    assert.equal((await client.listTools()).tools.length, 36);
   }, 'legacy');
 });
 
@@ -120,6 +120,7 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
       'delete_account',
       'delete_transaction',
       'delete_transaction_category',
+      'delete_transaction_tag',
       'get_account_history',
       'get_account_holdings',
       'get_account_snapshots_by_type',
@@ -152,8 +153,50 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
 
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
     assert.equal(byName.get('get_accounts')?.annotations?.readOnlyHint, true);
-    assert.equal(byName.get('refresh_accounts')?.annotations?.readOnlyHint, false);
-    assert.equal(byName.get('delete_account')?.annotations?.destructiveHint, true);
+    const readOnly = tools
+      .filter((tool) => tool.annotations?.readOnlyHint)
+      .map((tool) => tool.name);
+    const additive = tools
+      .filter((tool) => !tool.annotations?.readOnlyHint && !tool.annotations?.destructiveHint)
+      .map((tool) => tool.name)
+      .sort();
+    const destructive = tools
+      .filter((tool) => tool.annotations?.destructiveHint)
+      .map((tool) => tool.name)
+      .sort();
+    assert.equal(readOnly.length, 21);
+    assert.deepEqual(additive, [
+      'create_manual_account',
+      'create_transaction',
+      'create_transaction_category',
+      'create_transaction_tag',
+      'refresh_accounts',
+    ]);
+    assert.deepEqual(destructive, [
+      'delete_account',
+      'delete_transaction',
+      'delete_transaction_category',
+      'delete_transaction_tag',
+      'set_budget_amount',
+      'set_transaction_splits',
+      'set_transaction_tags',
+      'update_account',
+      'update_transaction',
+      'upload_account_balance_history',
+    ]);
+    assert.deepEqual(
+      tools
+        .filter((tool) => tool.annotations?.idempotentHint === false)
+        .map((tool) => tool.name)
+        .sort(),
+      [
+        'create_manual_account',
+        'create_transaction',
+        'create_transaction_category',
+        'create_transaction_tag',
+      ],
+    );
+    assert.ok(tools.every((tool) => tool.annotations?.openWorldHint));
     assert.ok(byName.get('get_transactions')?.outputSchema);
   });
 });

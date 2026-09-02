@@ -362,6 +362,21 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
   addTool(
     server,
     {
+      name: 'delete_transaction_tag',
+      title: 'Delete transaction tag',
+      description: 'Delete a reusable transaction tag by ID.',
+      inputSchema: z.object({ tag_id: z.string().min(1).describe('Monarch transaction tag ID') }),
+      hints: REMOVE,
+    },
+    async ({ tag_id }) => {
+      await session.write((client) => client.deleteTransactionTag(tag_id));
+      return { data: { deleted: true, tag_id }, summary: `Deleted transaction tag ${tag_id}.` };
+    },
+  );
+
+  addTool(
+    server,
+    {
       name: 'create_transaction_category',
       title: 'Create transaction category',
       description: 'Create a category in an existing category group.',
