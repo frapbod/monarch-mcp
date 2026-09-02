@@ -100,8 +100,15 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: READ_ONLY,
     },
     async () => {
-      const data = await session.read((client) => client.getTransactionsSummary());
-      return { data, summary: 'Retrieved aggregate transaction summary.' };
+      const response = await session.read((client) => client.getTransactionsSummary());
+      const aggregate = Array.isArray(response.aggregates)
+        ? response.aggregates[0]
+        : response.aggregates;
+      if (!aggregate?.summary) throw new Error('Monarch returned no transaction summary');
+      return {
+        data: { summary: aggregate.summary },
+        summary: 'Retrieved aggregate transaction summary.',
+      };
     },
   );
 

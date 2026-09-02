@@ -50,19 +50,21 @@ const uploadedBalanceHistory: Array<{ accountId: string; csvContent: string }> =
 const fakeClient = {
   getAccounts: async () => ({ accounts: [account], householdPreferences: { id: 'household-1' } }),
   getTransactionsSummary: async () => ({
-    aggregates: {
-      summary: {
-        avg: 42.5,
-        count: 1,
-        max: 42.5,
-        maxExpense: 42.5,
-        sum: 42.5,
-        sumIncome: 0,
-        sumExpense: 42.5,
-        first: '2026-09-01',
-        last: '2026-09-01',
+    aggregates: [
+      {
+        summary: {
+          avg: 42.5,
+          count: 1,
+          max: 42.5,
+          maxExpense: 42.5,
+          sum: 42.5,
+          sumIncome: 0,
+          sumExpense: 42.5,
+          first: '2026-09-01',
+          last: '2026-09-01',
+        },
       },
-    },
+    ],
   }),
   getTransactions: async () => ({
     allTransactions: { totalCount: 101, results: [transaction] },
@@ -198,10 +200,10 @@ test('returns the upstream transaction summary without projection loss', async (
   await withClient(async (client) => {
     const result = await client.callTool({ name: 'get_transactions_summary', arguments: {} });
     const output = result.structuredContent as {
-      data: { aggregates: { summary: { count: number; first: string } } };
+      data: { summary: { count: number; first: string } };
     };
-    assert.equal(output.data.aggregates.summary.count, 1);
-    assert.equal(output.data.aggregates.summary.first, '2026-09-01');
+    assert.equal(output.data.summary.count, 1);
+    assert.equal(output.data.summary.first, '2026-09-01');
   });
 });
 
