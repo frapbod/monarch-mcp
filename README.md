@@ -6,7 +6,8 @@ without waiting for an npm release.
 
 The server uses the stable MCP TypeScript SDK v2 and serves both the modern
 `2026-07-28` protocol and older MCP clients over stdio. Every successful call
-returns concise text plus a schema-declared `structuredContent` envelope. Paginated calls expose
+returns concise text plus a schema-declared `structuredContent` envelope; clients
+read the envelope for the data rather than parsing the text. Paginated calls expose
 `total`, `returned`, and `next_offset`; compact records always keep their IDs.
 
 ## Run

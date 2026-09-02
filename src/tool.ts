@@ -132,7 +132,7 @@ export function addTool<Shape extends z.ZodRawShape>(
           content: [
             {
               type: 'text' as const,
-              text: `${result.summary}\n${JSON.stringify(output)}`,
+              text: result.summary,
             },
           ],
           structuredContent: output,

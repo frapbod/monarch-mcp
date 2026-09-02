@@ -105,6 +105,11 @@ test('serves the complete tool surface over legacy MCP', async () => {
   await withClient(async (client) => {
     assert.equal(client.getProtocolEra(), 'legacy');
     assert.equal((await client.listTools()).tools.length, 36);
+    const result = await client.callTool({
+      name: 'get_accounts',
+      arguments: { detail: 'compact' },
+    });
+    assert.ok(result.structuredContent);
   }, 'legacy');
 });
 
@@ -211,6 +216,8 @@ test('compact account results retain the account ID and freshness fields', async
     const output = result.structuredContent as {
       data: { accounts: Array<Record<string, unknown>> };
     };
+    assert.deepEqual(result.content, [{ type: 'text', text: 'Found 1 Monarch accounts.' }]);
+    assert.doesNotMatch(JSON.stringify(result.content), /account-123/);
     assert.equal(output.data.accounts[0]?.id, 'account-123');
     assert.equal(output.data.accounts[0]?.last_updated_at, '2026-09-01T12:00:00Z');
   });
