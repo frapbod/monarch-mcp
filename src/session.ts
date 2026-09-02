@@ -6,6 +6,7 @@ import {
 } from '@hakimelek/monarchmoney';
 
 import type { RuntimeConfig } from './config.js';
+import { AuthenticationError } from './errors.js';
 
 export type MonarchClient = MonarchMoney;
 export type ClientFactory = (options: MonarchMoneyOptions) => MonarchClient;
@@ -96,7 +97,9 @@ export class MonarchSession implements MonarchAccess {
       token = authenticator.token ?? undefined;
     }
 
-    if (!token) throw new Error('Monarch authentication completed without returning a token');
+    if (!token) {
+      throw new AuthenticationError('Monarch authentication completed without returning a token');
+    }
 
     const common = {
       token,

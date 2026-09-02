@@ -12,6 +12,7 @@ import {
   addTool,
   dateSchema,
   detailSchema,
+  invalidInput,
 } from '../tool.js';
 
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
@@ -312,7 +313,7 @@ export function registerAccountTools(server: McpServer, session: MonarchAccess):
     },
     async ({ account_id, ...updates }) => {
       if (Object.values(updates).every((value) => value === undefined)) {
-        throw new Error('At least one account field must be supplied');
+        invalidInput('At least one account field must be supplied');
       }
       const data = await session.write((client) =>
         client.updateAccount(account_id, {

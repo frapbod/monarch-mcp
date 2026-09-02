@@ -7,8 +7,17 @@ import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 
+import { AuthenticationError, InputValidationError } from '../src/errors.js';
+import { classifyError } from '../src/events.js';
 import { createServer } from '../src/server.js';
 import type { MonarchAccess, MonarchClient } from '../src/session.js';
+
+test('classifies local and upstream failures accurately', () => {
+  assert.equal(classifyError(new InputValidationError('invalid')), 'validation');
+  assert.equal(classifyError(new AuthenticationError('denied')), 'authentication');
+  assert.equal(classifyError(Object.assign(new Error('request'), { statusCode: 429 })), 'http_429');
+  assert.equal(classifyError(new Error('response shape changed')), 'upstream');
+});
 
 async function invoke(access: MonarchAccess, accountId: string): Promise<boolean> {
   const handler = createMcpHandler(() => createServer(access));

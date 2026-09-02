@@ -1,5 +1,7 @@
 import { appendFileSync } from 'node:fs';
 
+import { AuthenticationError, InputValidationError } from './errors.js';
+
 interface ToolEvent {
   readonly tool: string;
   readonly outcome: 'success' | 'error';
@@ -11,6 +13,8 @@ interface ToolEvent {
 }
 
 export function classifyError(error: unknown): string {
+  if (error instanceof InputValidationError) return 'validation';
+  if (error instanceof AuthenticationError) return 'authentication';
   const value = error as { name?: unknown; statusCode?: unknown } | null;
   const status = Number(value?.statusCode);
   if (status === 401 || status === 403) return 'authentication';
