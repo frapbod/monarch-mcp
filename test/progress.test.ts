@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -379,6 +379,10 @@ test('cancelling after a retroactive rule write still completes its durable jour
 });
 
 test('cancelling an active undo stops new writes and marks partial work uncertain', async () => {
+  const eventDirectory = mkdtempSync(join(tmpdir(), 'monarch-mcp-cancel-events-'));
+  const eventLog = join(eventDirectory, 'events.jsonl');
+  const previousEventLog = process.env.MONARCH_MCP_EVENT_LOG;
+  process.env.MONARCH_MCP_EVENT_LOG = eventLog;
   let writes = 0;
   const client = {
     updateTransaction: async () => {
@@ -386,26 +390,36 @@ test('cancelling an active undo stops new writes and marks partial work uncertai
       await delay(25);
     },
   } as unknown as MonarchClient;
-  await withClient(client, async (mcp, changes) => {
-    const change = changes.record({
-      tool: 'bulk_update_transactions',
-      affected_count: 8,
-      reversible: true,
-      undo: Array.from({ length: 8 }, (_, index) => ({
-        operation: 'update_transaction' as const,
-        id: `transaction-${index}`,
-        values: { merchantName: 'Old merchant' },
-      })),
+  try {
+    await withClient(client, async (mcp, changes) => {
+      const change = changes.record({
+        tool: 'bulk_update_transactions',
+        affected_count: 8,
+        reversible: true,
+        undo: Array.from({ length: 8 }, (_, index) => ({
+          operation: 'update_transaction' as const,
+          id: `transaction-${index}`,
+          values: { merchantName: 'Old merchant' },
+        })),
+      });
+      const abort = new AbortController();
+      const request = mcp.callTool(
+        { name: 'undo_change', arguments: { change_id: change.id, force: true } },
+        { signal: abort.signal },
+      );
+      setTimeout(() => abort.abort(), 5);
+      await assert.rejects(request, /AbortError/);
+      await delay(50);
+      assert.equal(writes, 4);
+      assert.equal(changes.get(change.id)?.status, 'uncertain');
+      const event = JSON.parse(readFileSync(eventLog, 'utf8').trim()) as Record<string, unknown>;
+      assert.equal(event.outcome, 'cancelled');
+      assert.equal(event.change_id, change.id);
+      assert.equal(event.affected_count, 4);
     });
-    const abort = new AbortController();
-    const request = mcp.callTool(
-      { name: 'undo_change', arguments: { change_id: change.id, force: true } },
-      { signal: abort.signal },
-    );
-    setTimeout(() => abort.abort(), 5);
-    await assert.rejects(request, /AbortError/);
-    await delay(50);
-    assert.equal(writes, 4);
-    assert.equal(changes.get(change.id)?.status, 'uncertain');
-  });
+  } finally {
+    if (previousEventLog === undefined) delete process.env.MONARCH_MCP_EVENT_LOG;
+    else process.env.MONARCH_MCP_EVENT_LOG = previousEventLog;
+    rmSync(eventDirectory, { recursive: true, force: true });
+  }
 });
