@@ -32,7 +32,7 @@ export function createServer(
     { name: 'monarch-money', version: packageVersion() },
     {
       instructions:
-        'Use IDs returned by read tools. Preview transaction rules before applying them retroactively. Successful mutations return a durable local change_id; inspect it with get_change_history and reverse it with undo_change. A normal undo refuses to overwrite newer state; force only after inspection. This server cannot move money or make payments.',
+        'Use IDs returned by read tools. Preview transaction rules before applying them retroactively. Successful mutations return a durable local change_id; inspect it with get_change_history, reverse it with undo_change, and reapply stable-ID changes with redo_change. Normal undo and redo refuse to overwrite newer state; force only after inspection. This server cannot move money or make payments.',
     },
   );
   registerAccountTools(server, session, changes);

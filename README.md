@@ -73,7 +73,8 @@ The image is built with `make image`; its stdio entrypoint is the server.
 ### Change history
 
 - `get_change_history` — inspect change IDs, affected counts, status, and saved inverse operations
-- `undo_change` — idempotently reverse a journaled change; this is not a redo facility
+- `undo_change` — idempotently reverse a journaled change
+- `redo_change` — reapply an undone stable-ID update
 
 Transaction edits, bulk review work, recurring corrections, and rule changes are
 journaled before the upstream write as atomic mode-0600 records. The local
@@ -81,6 +82,11 @@ journaled before the upstream write as atomic mode-0600 records. The local
 Completed results include their `change_id` and affected count, and ambiguous
 responses retain an `uncertain` journal entry. Before undo, state guards detect
 newer edits and require `force=true` rather than silently overwriting them.
+Undo verifies the restored state and records a second guard before redo becomes
+available. Redo then refuses to overwrite any edit made after undo. Stable-ID
+account, transaction, split, tag, budget, recurring, and non-retroactive rule
+updates are redoable; identity-changing creates and deletes are not presented as
+the same Monarch object after recreation.
 Retroactive rule application snapshots matching transactions before the rule
 runs, including their tags and splits. If Monarch's reported applied count
 differs from the previewed set, the change is explicitly marked as requiring

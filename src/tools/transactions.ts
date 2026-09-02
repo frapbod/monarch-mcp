@@ -3,17 +3,16 @@ import * as z from 'zod/v4';
 
 import {
   activatePrepared,
+  type ChangeStep,
   type ChangeStore,
   type TransactionGuard,
   type TransactionValues,
-  type UndoStep,
   journalMutation,
 } from '../changes.js';
 import { mapConcurrent } from '../concurrency.js';
 import { compactTransaction } from '../projections.js';
 import type { MonarchAccess } from '../session.js';
 import {
-  transactionGuard,
   transactionSplitValues,
   transactionTagIds,
   transactionValues,
@@ -70,7 +69,7 @@ type BulkPlan =
       readonly kind: 'write';
       readonly transaction_id: string;
       readonly expected: TransactionValues;
-      readonly undo: Extract<UndoStep, { operation: 'update_transaction' }>;
+      readonly undo: Extract<ChangeStep, { operation: 'update_transaction' }>;
     };
 
 function clientUpdate(update: TransactionUpdate): TransactionValues {
@@ -93,6 +92,15 @@ function updateMatches(data: Record<string, unknown>, expected: TransactionValue
   return Object.entries(expected).every(
     ([key, value]) => actual[key as keyof TransactionValues] === value,
   );
+}
+
+function selectedTransactionValues(
+  actual: TransactionValues,
+  selected: TransactionValues,
+): TransactionValues {
+  return Object.fromEntries(
+    Object.keys(selected).map((key) => [key, actual[key as keyof TransactionValues]]),
+  ) as TransactionValues;
 }
 
 export function registerTransactionTools(
@@ -306,7 +314,7 @@ export function registerTransactionTools(
         ...(args.notes !== undefined ? { notes: args.notes } : {}),
         updateBalance: args.update_account_balance,
       };
-      const accountUndo: UndoStep[] = account
+      const accountUndo: ChangeStep[] = account
         ? [
             {
               operation: 'update_account',
@@ -383,17 +391,13 @@ export function registerTransactionTools(
       }
       const before = await session.read((client) => client.getTransactionDetails(transaction_id));
       const expected = clientUpdate(updates);
+      const previous = selectedTransactionValues(transactionValues(before), expected);
       const prepared = changes.prepare({
         tool: 'update_transaction',
         affected_count: 1,
         reversible: true,
-        undo: [
-          {
-            operation: 'update_transaction',
-            id: transaction_id,
-            values: transactionValues(before),
-          },
-        ],
+        undo: [{ operation: 'update_transaction', id: transaction_id, values: previous }],
+        redo: [{ operation: 'update_transaction', id: transaction_id, values: expected }],
       });
       let data: unknown;
       let writeError: unknown;
@@ -407,13 +411,18 @@ export function registerTransactionTools(
       try {
         const after = await session.read((client) => client.getTransactionDetails(transaction_id));
         verified = updateMatches(after, expected);
-        if (verified) guard = transactionGuard(after);
+        guard = {
+          kind: 'transaction',
+          id: transaction_id,
+          values: selectedTransactionValues(transactionValues(after), expected),
+        };
       } catch {
         // The inverse is still recorded because the write may have reached Monarch.
       }
-      const change = activatePrepared(changes, prepared.id, {
+      const active = activatePrepared(changes, prepared.id, {
         guards: guard ? [guard] : [],
       });
+      const change = verified ? active : changes.markUncertain(active.id);
       return {
         data: {
           result: data,
@@ -426,6 +435,7 @@ export function registerTransactionTools(
         summary: verified
           ? `Updated transaction ${transaction_id}; undo with ${change.id}.`
           : `Transaction ${transaction_id} could not be verified after the write; restore with ${change.id}.`,
+        ambiguous: !verified,
         change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
@@ -482,7 +492,10 @@ export function registerTransactionTools(
                 undo: {
                   operation: 'update_transaction' as const,
                   id: transaction_id,
-                  values: transactionValues(before),
+                  values: selectedTransactionValues(
+                    transactionValues(before),
+                    clientUpdate(fields),
+                  ),
                 },
               };
             } catch (error) {
@@ -521,7 +534,8 @@ export function registerTransactionTools(
         let outcome: {
           result: BulkResult;
           guard?: TransactionGuard;
-          undo?: UndoStep;
+          undo?: ChangeStep;
+          redo?: ChangeStep;
           attempted: boolean;
         };
         if (plan.kind === 'failed') {
@@ -546,7 +560,11 @@ export function registerTransactionTools(
               client.getTransactionDetails(transaction_id),
             );
             verified = updateMatches(after, expected);
-            if (verified) guard = transactionGuard(after);
+            guard = {
+              kind: 'transaction',
+              id: transaction_id,
+              values: selectedTransactionValues(transactionValues(after), expected),
+            };
           } catch {
             // Preserve the inverse for an outcome that cannot be read back.
           }
@@ -560,6 +578,11 @@ export function registerTransactionTools(
             },
             ...(guard ? { guard } : {}),
             undo: plan.undo,
+            redo: {
+              operation: 'update_transaction' as const,
+              id: transaction_id,
+              values: expected,
+            },
             attempted: true,
           };
         }
@@ -582,10 +605,16 @@ export function registerTransactionTools(
         ? activatePrepared(changes, prepared.id, {
             affected_count: attempted.length,
             undo: attempted.flatMap((outcome) => (outcome.undo ? [outcome.undo] : [])),
+            redo: attempted.flatMap((outcome) => (outcome.redo ? [outcome.redo] : [])),
             guards: attempted.flatMap((outcome) => (outcome.guard ? [outcome.guard] : [])),
           })
         : undefined;
-      const change = active && attempted.length ? active : undefined;
+      const change =
+        active && attempted.length
+          ? ambiguousCount > 0
+            ? changes.markUncertain(active.id)
+            : active
+          : undefined;
       if (active && !change) changes.markUndone(active.id);
       return {
         data: {
@@ -598,6 +627,7 @@ export function registerTransactionTools(
         },
         summary: `Verified ${updatedCount}, ambiguous ${ambiguousCount}, failed ${failedCount}, and cancelled ${cancelledCount} of ${results.length} transaction updates${change ? `; undo attempted writes with ${change.id}` : ''}.`,
         cancelled: cancelledCount > 0 || requestCancelled(context),
+        ambiguous: ambiguousCount > 0,
         ...(change
           ? { change: { id: change.id, affectedCount: attempted.length, reversible: true } }
           : {}),
@@ -680,6 +710,13 @@ export function registerTransactionTools(
               splits: transactionSplitValues(before),
             },
           ],
+          redo: [
+            {
+              operation: 'set_transaction_splits',
+              id: transaction_id,
+              splits: requestedSplits,
+            },
+          ],
         },
         () =>
           session.write((client) =>
@@ -720,6 +757,7 @@ export function registerTransactionTools(
           affected_count: 1,
           reversible: true,
           undo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: oldTags }],
+          redo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: tag_ids }],
         },
         () => session.write((client) => client.setTransactionTags(transaction_id, tag_ids)),
         () => ({ guards: [{ kind: 'transaction', id: transaction_id, tagIds: tag_ids }] }),

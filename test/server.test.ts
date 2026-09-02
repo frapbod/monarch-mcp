@@ -110,7 +110,7 @@ async function withClient(
 test('serves the complete tool surface over legacy MCP', async () => {
   await withClient(async (client) => {
     assert.equal(client.getProtocolEra(), 'legacy');
-    assert.equal((await client.listTools()).tools.length, 46);
+    assert.equal((await client.listTools()).tools.length, 47);
     const result = await client.callTool({
       name: 'get_accounts',
       arguments: { detail: 'compact' },
@@ -161,6 +161,7 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
       'get_transactions',
       'get_transactions_summary',
       'preview_transaction_rule',
+      'redo_change',
       'refresh_accounts',
       'set_budget_amount',
       'set_transaction_splits',
@@ -202,6 +203,7 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
       'delete_transaction_category',
       'delete_transaction_rule',
       'delete_transaction_tag',
+      'redo_change',
       'set_budget_amount',
       'set_transaction_splits',
       'set_transaction_tags',

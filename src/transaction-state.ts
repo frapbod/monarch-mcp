@@ -1,6 +1,6 @@
 import type { RecurringMerchantUpdate } from '@hakimelek/monarchmoney';
 
-import type { TransactionGuard, TransactionValues, UndoStep } from './changes.js';
+import type { ChangeStep, TransactionGuard, TransactionValues } from './changes.js';
 
 export function transactionFromDetails(data: Record<string, unknown>): Record<string, unknown> {
   const transaction = data.transaction;
@@ -52,7 +52,7 @@ export function transactionSplitValues(data: Record<string, unknown>): Array<{
   });
 }
 
-export function transactionUndoStep(details: Record<string, unknown>): UndoStep {
+export function transactionUndoStep(details: Record<string, unknown>): ChangeStep {
   const transaction = transactionFromDetails(details);
   const id = transaction.id as string;
   return {
@@ -79,14 +79,28 @@ export function recurringMatches(
   details: Record<string, unknown>,
   expected: RecurringMerchantUpdate,
 ): boolean {
+  const actual = recurringValues(details);
+  if (actual.isRecurring !== expected.isRecurring) return false;
+  return Object.entries(expected).every(
+    ([key, value]) =>
+      ['merchantId', 'name'].includes(key) || actual[key as keyof typeof actual] === value,
+  );
+}
+
+export function recurringValues(details: Record<string, unknown>): RecurringMerchantUpdate {
   const transaction = transactionFromDetails(details);
   const merchant = transaction.merchant as
-    | { recurringTransactionStream?: Record<string, unknown> | null }
+    | { id?: string; name?: string; recurringTransactionStream?: Record<string, unknown> | null }
     | undefined;
+  if (!merchant?.id || !merchant.name) throw new Error('Transaction has no recurring merchant');
   const stream = merchant?.recurringTransactionStream;
-  if (!expected.isRecurring) return stream === null;
-  if (!stream) return false;
-  return Object.entries(expected).every(
-    ([key, value]) => ['isRecurring', 'merchantId', 'name'].includes(key) || stream[key] === value,
-  );
+  return {
+    merchantId: merchant.id,
+    name: merchant.name,
+    isRecurring: Boolean(stream),
+    ...(typeof stream?.frequency === 'string' ? { frequency: stream.frequency } : {}),
+    ...(typeof stream?.baseDate === 'string' ? { baseDate: stream.baseDate } : {}),
+    ...(typeof stream?.amount === 'number' ? { amount: stream.amount } : {}),
+    ...(typeof stream?.isActive === 'boolean' ? { isActive: stream.isActive } : {}),
+  };
 }

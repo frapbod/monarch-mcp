@@ -10,10 +10,10 @@ import * as z from 'zod/v4';
 
 import {
   activatePrepared,
-  type ChangeRecord,
   type ChangeGuard,
+  type ChangeRecord,
+  type ChangeStep,
   type ChangeStore,
-  type UndoStep,
   performPrepared,
 } from '../changes.js';
 import { mapConcurrent } from '../concurrency.js';
@@ -227,7 +227,7 @@ async function captureUndo(
   client: MonarchClient,
   transactions: Transaction[],
   context: ServerContext,
-): Promise<UndoStep[]> {
+): Promise<ChangeStep[]> {
   let captured = 0;
   return mapConcurrent(transactions, 8, async (transaction) => {
     throwIfCancelled(context);
@@ -272,8 +272,9 @@ async function completeRuleChange(
   definition: TransactionRuleInput,
   result: TransactionRule,
   matches: Transaction[],
-  undo: UndoStep[],
+  undo: ChangeStep[],
   appliedCount: number,
+  redo?: ChangeStep[],
 ): Promise<{ change: ChangeRecord; exactUndo: boolean }> {
   const total = ruleProgressTotal(matches.length);
   await reportProgress(
@@ -304,6 +305,7 @@ async function completeRuleChange(
       ? null
       : "Monarch's applied count differed from the locally previewed transaction set.",
     undo,
+    ...(redo ? { redo } : {}),
     guards,
   });
   if (countMatches && matches.length) {
@@ -453,6 +455,7 @@ export function registerRuleTools(
         },
         summary: `Created rule ${created.id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
         cancelled: requestCancelled(context),
+        ambiguous: !exactUndo,
         change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },
@@ -526,6 +529,15 @@ export function registerRuleTools(
         matches,
         [...historicalUndo, { operation: 'update_transaction_rule', id: rule_id, values: restore }],
         appliedCount,
+        matches.length
+          ? undefined
+          : [
+              {
+                operation: 'update_transaction_rule',
+                id: rule_id,
+                values: ruleRestoreInput(updated),
+              },
+            ],
       );
       return {
         data: {
@@ -536,6 +548,7 @@ export function registerRuleTools(
         },
         summary: `Updated rule ${rule_id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
         cancelled: requestCancelled(context),
+        ambiguous: !exactUndo,
         change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },

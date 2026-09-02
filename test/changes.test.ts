@@ -30,7 +30,7 @@ async function withClient(
   }
 }
 
-test('journals, exposes, and idempotently undoes a transaction update', async () => {
+test('undo and redo protect targeted fields without blocking unrelated edits', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-changes-'));
   const changes = new FileChangeStore(directory);
   const transaction = {
@@ -54,6 +54,7 @@ test('journals, exposes, and idempotently undoes a transaction update', async ()
       if (typeof updates.needsReview === 'boolean') {
         transaction.needsReview = updates.needsReview;
       }
+      if (typeof updates.notes === 'string') transaction.notes = updates.notes;
       return { updateTransaction: { transaction: { id: transaction.id }, errors: [] } };
     },
   } as unknown as MonarchClient;
@@ -79,31 +80,44 @@ test('journals, exposes, and idempotently undoes a transaction update', async ()
       assert.equal(transaction.merchant.name, 'New merchant');
       assert.equal(changes.get(updateData.data.change_id)?.status, 'active');
 
+      transaction.notes = 'Unrelated human edit';
+      const undone = await mcp.callTool({
+        name: 'undo_change',
+        arguments: { change_id: updateData.data.change_id },
+      });
+      assert.notEqual(undone.isError, true);
+      assert.equal(transaction.merchant.name, 'Old merchant');
+      assert.equal(transaction.needsReview, true);
+      assert.equal(transaction.notes, 'Unrelated human edit');
+      assert.equal(changes.get(updateData.data.change_id)?.status, 'undone');
+      assert.ok(changes.get(updateData.data.change_id)?.redo_guards?.length);
+
       transaction.merchant.name = 'Newer human edit';
       const conflicted = await mcp.callTool({
-        name: 'undo_change',
+        name: 'redo_change',
         arguments: { change_id: updateData.data.change_id },
       });
       assert.equal(conflicted.isError, true);
       assert.match(JSON.stringify(conflicted.content), /conflicts with newer Monarch state/);
       assert.equal(transaction.merchant.name, 'Newer human edit');
-      assert.equal(changes.get(updateData.data.change_id)?.status, 'active');
-
-      const undone = await mcp.callTool({
-        name: 'undo_change',
-        arguments: { change_id: updateData.data.change_id, force: true },
-      });
-      assert.notEqual(undone.isError, true);
-      assert.equal(transaction.merchant.name, 'Old merchant');
-      assert.equal(transaction.needsReview, true);
       assert.equal(changes.get(updateData.data.change_id)?.status, 'undone');
 
+      const redone = await mcp.callTool({
+        name: 'redo_change',
+        arguments: { change_id: updateData.data.change_id, force: true },
+      });
+      assert.notEqual(redone.isError, true);
+      assert.equal(transaction.merchant.name, 'New merchant');
+      assert.equal(transaction.needsReview, false);
+      assert.equal(transaction.notes, 'Unrelated human edit');
+      assert.equal(changes.get(updateData.data.change_id)?.status, 'active');
+
       const repeated = await mcp.callTool({
-        name: 'undo_change',
+        name: 'redo_change',
         arguments: { change_id: updateData.data.change_id },
       });
-      assert.match(JSON.stringify(repeated.content), /already undone/);
-      assert.equal(transaction.merchant.name, 'Old merchant');
+      assert.match(JSON.stringify(repeated.content), /already redone/);
+      assert.equal(transaction.merchant.name, 'New merchant');
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -140,6 +154,185 @@ test('records inverse operations atomically and lists newest changes first', asy
     assert.equal(changes.markUndone(first.id).status, 'undone');
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an update with no readable outcome stays uncertain and requires forced recovery', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-ambiguous-'));
+  const changes = new FileChangeStore(directory);
+  let reads = 0;
+  const client = {
+    getTransactionDetails: async () => {
+      reads += 1;
+      if (reads > 1) throw new Error('readback unavailable');
+      return {
+        transaction: {
+          id: 'transaction-1',
+          amount: -10,
+          date: '2026-09-01',
+          notes: '',
+          hideFromReports: false,
+          needsReview: true,
+          category: { id: 'category-1' },
+          merchant: { name: 'Old merchant' },
+          goal: null,
+          tags: [],
+        },
+      };
+    },
+    updateTransaction: async () => {
+      throw new Error('connection closed after request');
+    },
+  } as unknown as MonarchClient;
+  const access: MonarchAccess = {
+    read: async (operation) => operation(client),
+    write: async (operation) => operation(client),
+  };
+
+  try {
+    await withClient(access, changes, async (mcp) => {
+      const result = await mcp.callTool({
+        name: 'update_transaction',
+        arguments: { transaction_id: 'transaction-1', merchant_name: 'New merchant' },
+      });
+      const output = result.structuredContent as { data: { change_id: string; status: string } };
+      assert.equal(output.data.status, 'ambiguous');
+      assert.equal(changes.get(output.data.change_id)?.status, 'uncertain');
+
+      const undo = await mcp.callTool({
+        name: 'undo_change',
+        arguments: { change_id: output.data.change_id },
+      });
+      assert.equal(undo.isError, true);
+      assert.match(JSON.stringify(undo.content), /uncertain upstream outcome/);
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an ambiguous but observed update still requires explicit forced recovery', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-observed-'));
+  const changes = new FileChangeStore(directory);
+  const transaction = {
+    id: 'transaction-1',
+    amount: -10,
+    date: '2026-09-01',
+    notes: '',
+    hideFromReports: false,
+    needsReview: true,
+    category: { id: 'category-1' },
+    merchant: { name: 'Old merchant' },
+    goal: null,
+    tags: [],
+  };
+  const client = {
+    getTransactionDetails: async () => ({ transaction: structuredClone(transaction) }),
+    updateTransaction: async () => ({ updateTransaction: { transaction: null, errors: [] } }),
+  } as unknown as MonarchClient;
+  const access: MonarchAccess = {
+    read: async (operation) => operation(client),
+    write: async (operation) => operation(client),
+  };
+
+  try {
+    await withClient(access, changes, async (mcp) => {
+      const result = await mcp.callTool({
+        name: 'update_transaction',
+        arguments: { transaction_id: 'transaction-1', merchant_name: 'New merchant' },
+      });
+      const output = result.structuredContent as { data: { change_id: string; status: string } };
+      assert.equal(output.data.status, 'ambiguous');
+      assert.equal(changes.get(output.data.change_id)?.status, 'uncertain');
+      assert.ok(changes.get(output.data.change_id)?.guards?.length);
+
+      transaction.merchant.name = 'Later human edit';
+      const undo = await mcp.callTool({
+        name: 'undo_change',
+        arguments: { change_id: output.data.change_id },
+      });
+      assert.equal(undo.isError, true);
+      assert.match(JSON.stringify(undo.content), /uncertain upstream outcome/);
+      assert.equal(transaction.merchant.name, 'Later human edit');
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('bulk and recurring updates retain uncertain recovery state when readback fails', async () => {
+  for (const tool of ['bulk_update_transactions', 'update_recurring_merchant'] as const) {
+    const directory = mkdtempSync(join(tmpdir(), `monarch-mcp-${tool}-`));
+    const changes = new FileChangeStore(directory);
+    let reads = 0;
+    const details = {
+      transaction: {
+        id: 'transaction-1',
+        amount: -10,
+        date: '2026-09-01',
+        notes: '',
+        hideFromReports: false,
+        needsReview: true,
+        category: { id: 'category-1' },
+        merchant: {
+          id: 'merchant-1',
+          name: 'Merchant',
+          recurringTransactionStream: {
+            frequency: 'monthly',
+            baseDate: '2026-09-01',
+            amount: -10,
+            isActive: true,
+          },
+        },
+        goal: null,
+        tags: [],
+      },
+    };
+    const client = {
+      getTransactionDetails: async () => {
+        reads += 1;
+        if (reads > 1) throw new Error('readback unavailable');
+        return structuredClone(details);
+      },
+      updateTransaction: async () => {
+        throw new Error('connection closed after request');
+      },
+      updateRecurringMerchant: async () => {
+        throw new Error('connection closed after request');
+      },
+    } as unknown as MonarchClient;
+    const access: MonarchAccess = {
+      read: async (operation) => operation(client),
+      write: async (operation) => operation(client),
+    };
+
+    try {
+      await withClient(access, changes, async (mcp) => {
+        const result =
+          tool === 'bulk_update_transactions'
+            ? await mcp.callTool({
+                name: tool,
+                arguments: {
+                  updates: [{ transaction_id: 'transaction-1', merchant_name: 'Updated' }],
+                },
+              })
+            : await mcp.callTool({
+                name: tool,
+                arguments: {
+                  transaction_id: 'transaction-1',
+                  is_recurring: true,
+                  frequency: 'weekly',
+                },
+              });
+        const output = result.structuredContent as {
+          data: { change_id: string; status?: string; ambiguous_count?: number };
+        };
+        assert.ok(output.data.status === 'ambiguous' || output.data.ambiguous_count === 1);
+        assert.equal(changes.get(output.data.change_id)?.status, 'uncertain');
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 

@@ -6,10 +6,16 @@ import * as z from 'zod/v4';
 import type { Account } from '@hakimelek/monarchmoney';
 
 import { budgetAmount } from '../budget-state.js';
-import type { AccountValues, ChangeGuard, ChangeStore, UndoStep } from '../changes.js';
+import type {
+  AccountValues,
+  ChangeStep,
+  ChangeGuard,
+  ChangeRecord,
+  ChangeStore,
+} from '../changes.js';
 import { mapConcurrent } from '../concurrency.js';
 import { RequestCancelledError } from '../errors.js';
-import { ruleInputFromApi } from '../rule-state.js';
+import { ruleInputFromApi, ruleRestoreInput } from '../rule-state.js';
 import type { MonarchAccess, MonarchClient } from '../session.js';
 import {
   READ_ONLY,
@@ -26,7 +32,7 @@ import {
   transactionValues,
 } from '../transaction-state.js';
 
-async function undo(client: MonarchClient, step: UndoStep): Promise<void> {
+async function applyStep(client: MonarchClient, step: ChangeStep): Promise<void> {
   switch (step.operation) {
     case 'update_transaction':
       await client.updateTransaction(step.id, step.values);
@@ -74,64 +80,115 @@ async function undo(client: MonarchClient, step: UndoStep): Promise<void> {
   }
 }
 
-function independentTransactionUndo(step: UndoStep): boolean {
+function independentTransactionStep(step: ChangeStep): boolean {
   return step.operation === 'update_transaction' || step.operation === 'restore_transaction';
 }
 
-async function undoAll(
+async function applySteps(
   client: MonarchClient,
-  steps: UndoStep[],
+  steps: ChangeStep[],
   context: ServerContext,
+  reverse: boolean,
+  verb: 'Restored' | 'Reapplied',
 ): Promise<void> {
-  const pending = [...steps].reverse();
+  const pending = reverse ? [...steps].reverse() : [...steps];
+  const action = verb === 'Restored' ? 'Undo' : 'Redo';
   let completed = 0;
   while (pending.length) {
     if (requestCancelled(context)) {
       throw new RequestCancelledError(
-        `Undo cancelled after ${completed} of ${steps.length} steps`,
+        `${action} cancelled after ${completed} of ${steps.length} steps`,
         completed,
       );
     }
     const next = pending.shift();
     if (!next) break;
-    if (!independentTransactionUndo(next)) {
-      await undo(client, next);
+    if (!independentTransactionStep(next)) {
+      await applyStep(client, next);
       completed += 1;
       await reportProgress(
         context,
         completed,
         steps.length,
-        `Restored ${completed} of ${steps.length}`,
+        `${verb} ${completed} of ${steps.length}`,
       );
       continue;
     }
-    const batch: UndoStep[] = [next];
-    while (pending[0] && independentTransactionUndo(pending[0])) {
+    const batch: ChangeStep[] = [next];
+    while (pending[0] && independentTransactionStep(pending[0])) {
       const candidate = pending.shift();
       if (candidate) batch.push(candidate);
     }
     try {
       await mapConcurrent(batch, 4, async (step) => {
-        if (requestCancelled(context)) throw new RequestCancelledError('Undo cancelled');
-        await undo(client, step);
+        if (requestCancelled(context)) {
+          throw new RequestCancelledError(`${action} cancelled`);
+        }
+        await applyStep(client, step);
         completed += 1;
         await reportProgress(
           context,
           completed,
           steps.length,
-          `Restored ${completed} of ${steps.length}`,
+          `${verb} ${completed} of ${steps.length}`,
         );
       });
     } catch (error) {
       if (error instanceof RequestCancelledError) {
         throw new RequestCancelledError(
-          `Undo cancelled after ${completed} of ${steps.length} steps`,
+          `${action} cancelled after ${completed} of ${steps.length} steps`,
           completed,
         );
       }
       throw error;
     }
   }
+}
+
+function guardsForSteps(steps: ChangeStep[]): ChangeGuard[] | undefined {
+  const guards: ChangeGuard[] = [];
+  for (const step of steps) {
+    switch (step.operation) {
+      case 'update_transaction':
+        guards.push({ kind: 'transaction', id: step.id, values: step.values });
+        break;
+      case 'set_transaction_tags':
+        guards.push({ kind: 'transaction', id: step.id, tagIds: step.tagIds });
+        break;
+      case 'set_transaction_splits':
+        guards.push({ kind: 'transaction', id: step.id, splits: step.splits });
+        break;
+      case 'restore_transaction':
+        guards.push({
+          kind: 'transaction',
+          id: step.id,
+          values: step.values,
+          tagIds: step.tagIds,
+          splits: step.splits,
+        });
+        break;
+      case 'update_recurring_merchant':
+        if (!step.transactionId) return undefined;
+        guards.push({
+          kind: 'recurring',
+          transactionId: step.transactionId,
+          values: step.values,
+        });
+        break;
+      case 'update_account':
+        guards.push({ kind: 'account', id: step.id, values: step.values });
+        break;
+      case 'update_transaction_rule':
+        guards.push({ kind: 'rule_update', id: step.id, values: step.values });
+        break;
+      case 'set_budget_amount':
+        guards.push({ kind: 'budget', values: step.values });
+        break;
+      default:
+        return undefined;
+    }
+  }
+  return guards;
 }
 
 function selectedValuesMatch<Values extends object>(
@@ -216,6 +273,18 @@ async function guardConflict(
           ? undefined
           : `rule:${guard.id}`;
       }
+      case 'rule_update': {
+        const rule = (await client.getTransactionRules()).transactionRules.find(
+          ({ id }) => id === guard.id,
+        );
+        return rule &&
+          isDeepStrictEqual(
+            withoutGraphqlMetadata(ruleRestoreInput(rule)),
+            withoutGraphqlMetadata(guard.values),
+          )
+          ? undefined
+          : `rule:${guard.id}`;
+      }
       case 'tag': {
         const tag = (await client.getTransactionTags()).tags.find(({ id }) => id === guard.id);
         const used = await client.getAllTransactions({ tagIds: [guard.id], pageSize: 1 });
@@ -266,6 +335,86 @@ async function conflictingGuards(client: MonarchClient, guards: ChangeGuard[]): 
   return conflicts.filter((value): value is string => value !== undefined);
 }
 
+async function applyRecovery(
+  session: MonarchAccess,
+  changes: ChangeStore,
+  change: ChangeRecord,
+  direction: 'undo' | 'redo',
+  force: boolean,
+  context: ServerContext,
+): Promise<ChangeRecord> {
+  const steps = direction === 'undo' ? change.undo : change.redo;
+  if (!steps?.length) {
+    throw new Error(
+      `Change ${change.id} is not automatically ${direction === 'undo' ? 'reversible' : 'redoable'}`,
+    );
+  }
+  const expected = direction === 'undo' ? change.guards : change.redo_guards;
+  try {
+    return await session.write(async (client) => {
+      throwIfCancelled(context);
+      if (!force) {
+        if (direction === 'redo' && !expected?.length) {
+          throw new Error(
+            `Change ${change.id} has no verified post-undo state; inspect it before retrying with force=true`,
+          );
+        }
+        if (expected?.length) {
+          const conflicts = await conflictingGuards(client, expected);
+          throwIfCancelled(context);
+          if (conflicts.length) {
+            throw new Error(
+              `Change ${change.id} conflicts with newer Monarch state for ${conflicts.join(', ')}; inspect it or retry with force=true`,
+            );
+          }
+        }
+      }
+
+      if (direction === 'undo') changes.markUndoing(change.id);
+      else changes.markRedoing(change.id);
+      await applySteps(
+        client,
+        steps,
+        context,
+        direction === 'undo',
+        direction === 'undo' ? 'Restored' : 'Reapplied',
+      );
+
+      const finalGuards = guardsForSteps(steps);
+      if (finalGuards?.length) {
+        const conflicts = await conflictingGuards(client, finalGuards);
+        if (conflicts.length) {
+          throw new Error(
+            `${direction === 'undo' ? 'Undo' : 'Redo'} could not be verified for ${conflicts.join(', ')}`,
+          );
+        }
+      } else if (direction === 'redo') {
+        throw new Error(`Change ${change.id} has a redo plan without a verifiable final state`);
+      }
+
+      return direction === 'undo'
+        ? changes.markUndone(change.id, change.redo?.length ? finalGuards : undefined)
+        : changes.markRedone(change.id, finalGuards);
+    });
+  } catch (error) {
+    const status = changes.get(change.id)?.status;
+    if (status === 'undoing' || status === 'redoing') {
+      try {
+        changes.markUncertain(change.id);
+      } catch {
+        // The transition record still identifies the interrupted recovery attempt.
+      }
+    }
+    if (error instanceof RequestCancelledError && error.completedCount > 0) {
+      throw new RequestCancelledError(error.message, error.completedCount, {
+        id: change.id,
+        reversible: change.reversible,
+      });
+    }
+    throw error;
+  }
+}
+
 export function registerChangeTools(
   server: McpServer,
   session: MonarchAccess,
@@ -277,7 +426,7 @@ export function registerChangeTools(
       name: 'get_change_history',
       title: 'Get change history',
       description:
-        'Inspect agent-made Monarch changes and their undo status. Supply change_id to include the saved inverse operations.',
+        'Inspect agent-made Monarch changes and recovery status. Supply change_id to include saved undo and redo operations.',
       inputSchema: z.object({
         change_id: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(100).default(20),
@@ -292,7 +441,16 @@ export function registerChangeTools(
       }
       const history = changes
         .list(limit)
-        .map(({ undo: _undo, guards: _guards, snapshot: _snapshot, ...change }) => change);
+        .map(
+          ({
+            undo: _undo,
+            redo: _redo,
+            guards: _guards,
+            redo_guards: _redoGuards,
+            snapshot: _snapshot,
+            ...change
+          }) => change,
+        );
       return {
         data: { changes: history },
         summary: `Retrieved ${history.length} recorded Monarch changes.`,
@@ -323,6 +481,7 @@ export function registerChangeTools(
       if (
         (change.status === 'prepared' ||
           change.status === 'undoing' ||
+          change.status === 'redoing' ||
           change.status === 'uncertain') &&
         !force
       ) {
@@ -338,41 +497,64 @@ export function registerChangeTools(
           summary: `Change ${change_id} was already undone.`,
         };
       }
-      try {
-        await session.write(async (client) => {
-          throwIfCancelled(context);
-          if (!force && change.guards?.length) {
-            const conflicts = await conflictingGuards(client, change.guards);
-            throwIfCancelled(context);
-            if (conflicts.length) {
-              throw new Error(
-                `Change ${change_id} conflicts with newer Monarch state for ${conflicts.join(', ')}; inspect it or retry with force=true`,
-              );
-            }
-          }
-          changes.markUndoing(change_id);
-          await undoAll(client, change.undo, context);
-        });
-        changes.markUndone(change_id);
-      } catch (error) {
-        if (changes.get(change_id)?.status === 'undoing') {
-          try {
-            changes.markUncertain(change_id);
-          } catch {
-            // The undoing record still captures the interrupted attempt.
-          }
-        }
-        if (error instanceof RequestCancelledError && error.completedCount > 0) {
-          throw new RequestCancelledError(error.message, error.completedCount, {
-            id: change_id,
-            reversible: change.reversible,
-          });
-        }
-        throw error;
-      }
+      await applyRecovery(session, changes, change, 'undo', force, context);
       return {
         data: { change_id, status: 'undone', affected_count: change.affected_count },
         summary: `Undid change ${change_id} across ${change.affected_count} records.`,
+        cancelled: requestCancelled(context),
+        change: {
+          id: change_id,
+          affectedCount: change.affected_count,
+          reversible: change.reversible,
+        },
+      };
+    },
+  );
+
+  addTool(
+    server,
+    {
+      name: 'redo_change',
+      title: 'Redo change',
+      description:
+        'Reapply a previously undone stable-ID change. Normal redo refuses to overwrite state changed after undo.',
+      inputSchema: z.object({
+        change_id: z.string().min(1),
+        force: z
+          .boolean()
+          .default(false)
+          .describe('Ignore post-undo conflicts and reapply the saved change anyway'),
+      }),
+      hints: UPDATE,
+    },
+    async ({ change_id, force }, context) => {
+      throwIfCancelled(context);
+      const change = changes.get(change_id);
+      if (!change) throw new Error(`Change ${change_id} was not found`);
+      if (!change.reversible) throw new Error(`Change ${change_id} is not reversible`);
+      if (!change.redo?.length) {
+        throw new Error(
+          `Change ${change_id} is not automatically redoable because it predates redo support or changes resource identity`,
+        );
+      }
+      if (change.status === 'active') {
+        if (change.redone_at) {
+          return {
+            data: { change_id, status: 'active', affected_count: change.affected_count },
+            summary: `Change ${change_id} was already redone.`,
+          };
+        }
+        throw new Error(`Change ${change_id} is already active; undo it before requesting redo`);
+      }
+      if (change.status !== 'undone') {
+        throw new Error(
+          `Change ${change_id} has status ${change.status}; redo requires a completed, verified undo`,
+        );
+      }
+      await applyRecovery(session, changes, change, 'redo', force, context);
+      return {
+        data: { change_id, status: 'active', affected_count: change.affected_count },
+        summary: `Redid change ${change_id} across ${change.affected_count} records.`,
         cancelled: requestCancelled(context),
         change: {
           id: change_id,

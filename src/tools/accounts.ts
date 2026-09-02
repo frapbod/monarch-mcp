@@ -20,6 +20,12 @@ import {
 
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
 
+function selectedAccountValues(actual: AccountValues, selected: AccountValues): AccountValues {
+  return Object.fromEntries(
+    Object.keys(selected).map((key) => [key, actual[key as keyof AccountValues]]),
+  ) as AccountValues;
+}
+
 export function registerAccountTools(
   server: McpServer,
   session: MonarchAccess,
@@ -385,7 +391,7 @@ export function registerAccountTools(
         ({ id }) => id === account_id,
       );
       if (!before) throw new Error(`Account ${account_id} was not found`);
-      const previous: AccountValues = {
+      const current: AccountValues = {
         accountName: before.displayName,
         accountBalance: before.displayBalance,
         accountType: before.type.name,
@@ -411,6 +417,7 @@ export function registerAccountTools(
           ? { hideTransactionsFromReports: updates.hide_transactions_from_reports }
           : {}),
       };
+      const previous = selectedAccountValues(current, requested);
       const { value: data, change } = await journalMutation(
         changes,
         {
@@ -418,13 +425,14 @@ export function registerAccountTools(
           affected_count: 1,
           reversible: true,
           undo: [{ operation: 'update_account', id: account_id, values: previous }],
+          redo: [{ operation: 'update_account', id: account_id, values: requested }],
         },
         () => session.write((client) => client.updateAccount(account_id, requested)),
         (result) => {
           if (!result.updateAccount.account)
             throw new Error(`Monarch did not update account ${account_id}`);
           return {
-            guards: [{ kind: 'account', id: account_id, values: { ...previous, ...requested } }],
+            guards: [{ kind: 'account', id: account_id, values: requested }],
           };
         },
       );
