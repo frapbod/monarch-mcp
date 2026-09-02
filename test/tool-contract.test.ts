@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 
 import { createServer } from '../src/server.js';
+import { FileChangeStore } from '../src/changes.js';
 import type { MonarchAccess, MonarchClient } from '../src/session.js';
 
 interface Call {
@@ -54,10 +58,58 @@ function responseFor(method: string): unknown {
     getTransactionCategories: { categories: [{ id: 'category-1', name: 'Category' }] },
     getTransactionCategoryGroups: { categoryGroups: [{ id: 'group-1', name: 'Group' }] },
     getTransactionTags: { tags: [{ id: 'tag-1', name: 'Tag' }] },
-    getBudgets: { budgetData: {} },
+    getBudgets: { budgetData: {}, goalsV2: [] },
     getCashflow: { summary: [] },
     getCashflowSummary: { summary: [] },
     getRecurringTransactions: { recurringTransactionItems: [] },
+    getAllTransactions: [],
+    createManualAccount: {
+      createManualAccount: { account: { id: 'account-2' }, errors: [] },
+    },
+    updateAccount: { updateAccount: { account, errors: [] } },
+    deleteAccount: { deleteAccount: { deleted: true, errors: [] } },
+    createTransaction: {
+      createTransaction: { transaction: { id: 'transaction-2' }, errors: [] },
+    },
+    createTransactionTag: {
+      createTransactionTag: {
+        tag: { id: 'tag-2', name: 'MCP-Test-Tag', color: '#4F46E5', order: 2 },
+        errors: [],
+      },
+    },
+    createTransactionCategory: {
+      createCategory: { category: { id: 'category-2', name: 'MCP-Test-Category' }, errors: [] },
+    },
+    getTransactionRules: {
+      transactionRules: [
+        {
+          id: 'rule-1',
+          order: 1,
+          merchantNameCriteria: [{ operator: 'contains', value: 'merchant' }],
+          setCategoryAction: { id: 'category-1', name: 'Category' },
+        },
+      ],
+    },
+    createTransactionRule: {
+      id: 'rule-2',
+      order: 2,
+      merchantNameCriteria: [{ operator: 'contains', value: 'new' }],
+      setCategoryAction: { id: 'category-1', name: 'Category' },
+      recentApplicationCount: 0,
+    },
+    updateTransactionRule: {
+      id: 'rule-1',
+      order: 1,
+      merchantNameCriteria: [{ operator: 'contains', value: 'merchant' }],
+      setCategoryAction: { id: 'category-2', name: 'Updated' },
+    },
+    deleteTransactionRule: true,
+    updateRecurringMerchant: {
+      updateMerchant: {
+        merchant: { id: 'merchant-1', name: 'Merchant', recurringTransactionStream: null },
+        errors: [],
+      },
+    },
   };
   return responses[method] ?? { ok: true };
 }
@@ -86,7 +138,8 @@ async function callTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<void> {
-  const handler = createMcpHandler(() => createServer(access));
+  const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-contract-'));
+  const handler = createMcpHandler(() => createServer(access, new FileChangeStore(directory)));
   const transport = new StreamableHTTPClientTransport(new URL('http://test.local/mcp'), {
     fetch: (url, init) => handler.fetch(new Request(url, init)),
   });
@@ -99,6 +152,7 @@ async function callTool(
   } finally {
     await client.close();
     await handler.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -398,13 +452,83 @@ const cases: ToolCase[] = [
     method: 'getRecurringTransactions',
     upstreamArgs: ['2026-08-01', '2026-09-01'],
   },
+  {
+    name: 'get_goals',
+    args: { start_date: '2026-08-01', end_date: '2026-09-01' },
+    method: 'getBudgets',
+    upstreamArgs: ['2026-08-01', '2026-09-01'],
+  },
+  {
+    name: 'update_recurring_merchant',
+    args: {
+      transaction_id: 'transaction-1',
+      is_recurring: true,
+      frequency: 'monthly',
+      base_date: '2026-09-01',
+      amount: 10,
+      is_active: true,
+    },
+    method: 'updateRecurringMerchant',
+    upstreamArgs: [
+      {
+        merchantId: 'merchant-1',
+        name: 'Merchant',
+        isRecurring: true,
+        frequency: 'monthly',
+        baseDate: '2026-09-01',
+        amount: 10,
+        isActive: true,
+      },
+    ],
+  },
+  {
+    name: 'get_transaction_rules',
+    args: {},
+    method: 'getTransactionRules',
+    upstreamArgs: [],
+  },
+  {
+    name: 'preview_transaction_rule',
+    args: { merchant_name_criteria: [{ operator: 'contains', value: 'merchant' }] },
+    method: 'getAllTransactions',
+    upstreamArgs: [{ pageSize: 500 }],
+  },
+  {
+    name: 'create_transaction_rule',
+    args: {
+      merchant_name_criteria: [{ operator: 'contains', value: 'new' }],
+      set_category_action: 'category-1',
+    },
+    method: 'createTransactionRule',
+    upstreamArgs: [
+      {
+        merchantNameCriteria: [{ operator: 'contains', value: 'new' }],
+        setCategoryAction: 'category-1',
+      },
+    ],
+  },
+  {
+    name: 'update_transaction_rule',
+    args: { rule_id: 'rule-1', set_category_action: 'category-2' },
+    method: 'updateTransactionRule',
+    upstreamArgs: ['rule-1', { setCategoryAction: 'category-2' }],
+  },
+  {
+    name: 'delete_transaction_rule',
+    args: { rule_id: 'rule-1' },
+    method: 'deleteTransactionRule',
+    upstreamArgs: ['rule-1'],
+  },
 ];
 
 for (const toolCase of cases) {
   test(`${toolCase.name} executes its documented upstream operation`, async () => {
     const calls: Call[] = [];
     await callTool(fakeAccess(calls), toolCase.name, toolCase.args);
-    assert.deepEqual(calls, [{ method: toolCase.method, args: toolCase.upstreamArgs }]);
+    assert.deepEqual(
+      calls.filter((call) => call.method === toolCase.method),
+      [{ method: toolCase.method, args: toolCase.upstreamArgs }],
+    );
   });
 }
 

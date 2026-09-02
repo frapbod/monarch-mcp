@@ -10,10 +10,14 @@ const PREFIX = 'MCP-Test-';
 type Data = Record<string, any>;
 
 function data(
-  result: { isError?: boolean | undefined; structuredContent?: unknown },
+  result: { isError?: boolean | undefined; structuredContent?: unknown; content?: unknown },
   tool: string,
 ): Data {
-  assert.notEqual(result.isError, true, `${tool} returned an MCP error`);
+  assert.notEqual(
+    result.isError,
+    true,
+    `${tool} returned an MCP error: ${JSON.stringify(result.content)}`,
+  );
   assert.ok(result.structuredContent, `${tool} returned no structured content`);
   return (result.structuredContent as { data: Data }).data;
 }
@@ -38,6 +42,15 @@ function transactionName(transaction: Data): string {
 }
 
 async function sweep(client: Client): Promise<void> {
+  const rules = (await call(client, 'get_transaction_rules')).transactionRules as Data[];
+  for (const rule of rules.filter((item) =>
+    (item.merchantNameCriteria ?? []).some((criterion: Data) =>
+      String(criterion.value).startsWith(PREFIX),
+    ),
+  )) {
+    await call(client, 'delete_transaction_rule', { rule_id: rule.id });
+  }
+
   const transactions = (
     await call(client, 'get_transactions', {
       search: PREFIX,
@@ -85,7 +98,7 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     await sweep(client);
 
     const listed = await client.listTools();
-    assert.equal(listed.tools.length, 36);
+    assert.equal(listed.tools.length, 46);
 
     const accounts = (await call(client, 'get_accounts', { detail: 'full' })).accounts as Data[];
     assert.ok(accounts.length > 0, 'get_accounts returned no accounts');
@@ -135,6 +148,33 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     await call(client, 'get_cashflow');
     await call(client, 'get_cashflow_summary');
     await call(client, 'get_recurring_transactions');
+    await call(client, 'get_goals');
+    await call(client, 'get_change_history', { limit: 5 });
+    await call(client, 'get_transactions', { needs_review: true, limit: 1 });
+    const recurringCandidates = (
+      await call(client, 'get_transactions', { is_recurring: true, limit: 10, detail: 'compact' })
+    ).transactions as Data[];
+    let recurringTransaction: Data | undefined;
+    for (const candidate of recurringCandidates) {
+      const detail = (await call(client, 'get_transaction', { transaction_id: candidate.id }))
+        .transaction;
+      if (detail.merchant?.recurringTransactionStream) {
+        recurringTransaction = detail;
+        break;
+      }
+    }
+    assert.ok(recurringTransaction, 'no recurring merchant is available for update validation');
+    const stream = recurringTransaction.merchant.recurringTransactionStream;
+    const recurringUpdate = await call(client, 'update_recurring_merchant', {
+      transaction_id: recurringTransaction.id,
+      is_recurring: true,
+      frequency: stream.frequency,
+      base_date: stream.baseDate,
+      amount: stream.amount,
+      is_active: stream.isActive,
+    });
+    assert.equal(recurringUpdate.status, 'updated');
+    await call(client, 'undo_change', { change_id: recurringUpdate.change_id });
 
     const option = (typeOptions.accountTypeOptions as Data[]).find(
       (item) => item.type?.name && (item.subtype?.name || item.type?.possibleSubtypes?.[0]?.name),
@@ -149,6 +189,30 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     const categoryName = `${PREFIX}Category-${suffix}`;
     const tagName = `${PREFIX}Tag-${suffix}`;
     const merchantName = `${PREFIX}Transaction-${suffix}`;
+    const ruleMatch = `${PREFIX}Rule-${suffix}`;
+
+    const preview = await call(client, 'preview_transaction_rule', {
+      merchant_name_criteria: [{ operator: 'eq', value: ruleMatch }],
+    });
+    assert.equal(preview.matching_count, 0);
+    const createdRule = await call(client, 'create_transaction_rule', {
+      merchant_name_criteria: [{ operator: 'eq', value: ruleMatch }],
+      set_category_action: categories[0].id,
+    });
+    const ruleId = createdRule.rule?.id;
+    assert.ok(ruleId, 'create_transaction_rule returned no rule ID');
+    const updatedRule = await call(client, 'update_transaction_rule', {
+      rule_id: ruleId,
+      set_merchant_action: `${ruleMatch}-Renamed`,
+    });
+    assert.equal(updatedRule.rule?.setMerchantAction?.name, `${ruleMatch}-Renamed`);
+    await call(client, 'undo_change', { change_id: updatedRule.change_id });
+    await call(client, 'undo_change', { change_id: createdRule.change_id });
+    assert.ok(
+      !((await call(client, 'get_transaction_rules')).transactionRules as Data[]).some(
+        (rule) => rule.id === ruleId,
+      ),
+    );
 
     const createdAccount = await call(client, 'create_manual_account', {
       name: accountName,
@@ -159,7 +223,7 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     });
     const accountId = createdAccount.createManualAccount?.account?.id;
     assert.ok(accountId, 'create_manual_account returned no account ID');
-    await call(client, 'update_account', {
+    const accountUpdate = await call(client, 'update_account', {
       account_id: accountId,
       name: `${accountName}-Updated`,
       balance: 2,
@@ -171,6 +235,11 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
       accountReadback.find((item) => item.id === accountId)?.name,
       `${accountName}-Updated`,
     );
+    await call(client, 'undo_change', { change_id: accountUpdate.change_id });
+    const restoredAccounts = (await call(client, 'get_accounts', { detail: 'compact' }))
+      .accounts as Data[];
+    assert.equal(restoredAccounts.find((item) => item.id === accountId)?.name, accountName);
+    assert.equal(restoredAccounts.find((item) => item.id === accountId)?.display_balance, 1);
     await call(client, 'upload_account_balance_history', {
       account_id: accountId,
       csv_content: `Date,Amount\n${priorDate()},2`,
@@ -196,6 +265,7 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
       end_date: currentMonth(),
     });
     assert.match(JSON.stringify(budgetReadback), new RegExp(categoryId));
+    await call(client, 'undo_change', { change_id: budget.change_id });
 
     const createdTag = await call(client, 'create_transaction_tag', {
       name: tagName,
@@ -218,7 +288,7 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     });
     const transactionId = createdTransaction.createTransaction?.transaction?.id;
     assert.ok(transactionId, 'create_transaction returned no transaction ID');
-    await call(client, 'update_transaction', {
+    const transactionUpdate = await call(client, 'update_transaction', {
       transaction_id: transactionId,
       merchant_name: `${merchantName}-Updated`,
       amount: 2,
@@ -231,20 +301,53 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     ).transaction;
     assert.equal(transactionReadback.merchant?.name, `${merchantName}-Updated`);
     assert.equal(transactionReadback.amount, 2);
+    await call(client, 'undo_change', { change_id: transactionUpdate.change_id });
+    const restoredTransaction = (
+      await call(client, 'get_transaction', { transaction_id: transactionId })
+    ).transaction;
+    assert.equal(restoredTransaction.merchant?.name, merchantName);
+    assert.equal(restoredTransaction.amount, 1);
 
-    await call(client, 'set_transaction_tags', {
+    const bulkUpdate = await call(client, 'bulk_update_transactions', {
+      updates: [
+        {
+          transaction_id: transactionId,
+          merchant_name: `${merchantName}-Updated`,
+          amount: 1,
+        },
+      ],
+    });
+    assert.equal(bulkUpdate.updated_count, 1);
+    assert.equal(bulkUpdate.failed_count, 0);
+    const newerUpdate = await call(client, 'update_transaction', {
+      transaction_id: transactionId,
+      merchant_name: `${merchantName}-Newer`,
+    });
+    const conflictedUndo = await client.callTool({
+      name: 'undo_change',
+      arguments: { change_id: bulkUpdate.change_id },
+    });
+    assert.equal(conflictedUndo.isError, true, 'undo_change did not protect a newer edit');
+    await call(client, 'undo_change', { change_id: newerUpdate.change_id });
+    await call(client, 'undo_change', { change_id: bulkUpdate.change_id });
+
+    const tagUpdate = await call(client, 'set_transaction_tags', {
       transaction_id: transactionId,
       tag_ids: [tagId],
     });
     const tagged = (await call(client, 'get_transaction', { transaction_id: transactionId }))
       .transaction;
     assert.ok(tagged.tags.some((tag: Data) => tag.id === tagId));
+    await call(client, 'undo_change', { change_id: tagUpdate.change_id });
+    const untagged = (await call(client, 'get_transaction', { transaction_id: transactionId }))
+      .transaction;
+    assert.ok(!untagged.tags.some((tag: Data) => tag.id === tagId));
 
-    await call(client, 'set_transaction_splits', {
+    const splitUpdate = await call(client, 'set_transaction_splits', {
       transaction_id: transactionId,
       splits: [
-        { merchant_name: `${PREFIX}Split-A`, amount: 1, category_id: categoryId },
-        { merchant_name: `${PREFIX}Split-B`, amount: 1, category_id: categoryId },
+        { merchant_name: `${PREFIX}Split-A`, amount: 0.5, category_id: categoryId },
+        { merchant_name: `${PREFIX}Split-B`, amount: 0.5, category_id: categoryId },
       ],
     });
     const splitReadback = (
@@ -253,6 +356,11 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
       })
     ).transaction;
     assert.equal(splitReadback.splitTransactions.length, 2);
+    await call(client, 'undo_change', { change_id: splitUpdate.change_id });
+    const unsplitReadback = (
+      await call(client, 'get_transaction_splits', { transaction_id: transactionId })
+    ).transaction;
+    assert.equal(unsplitReadback.splitTransactions.length, 0);
 
     await call(client, 'delete_transaction', { transaction_id: transactionId });
     const remainingTransactions = (

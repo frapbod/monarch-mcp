@@ -1,8 +1,23 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
+import {
+  activatePrepared,
+  type ChangeStore,
+  type TransactionGuard,
+  type TransactionValues,
+  type UndoStep,
+  journalMutation,
+} from '../changes.js';
+import { mapConcurrent } from '../concurrency.js';
 import { compactTransaction } from '../projections.js';
 import type { MonarchAccess } from '../session.js';
+import {
+  transactionGuard,
+  transactionSplitValues,
+  transactionTagIds,
+  transactionValues,
+} from '../transaction-state.js';
 import {
   CREATE,
   READ_ONLY,
@@ -18,7 +33,70 @@ import {
 const transactionId = z.string().min(1).describe('Monarch transaction ID');
 const categoryId = z.string().min(1).describe('Monarch category ID');
 
-export function registerTransactionTools(server: McpServer, session: MonarchAccess): void {
+const transactionUpdateShape = {
+  category_id: categoryId.optional(),
+  merchant_name: z.string().min(1).optional(),
+  goal_id: z.string().optional().describe('Monarch goal ID; use an empty string to unlink'),
+  amount: z.number().optional(),
+  date: dateSchema.optional(),
+  notes: z.string().optional(),
+  hidden_from_reports: z.boolean().optional(),
+  needs_review: z.boolean().optional(),
+};
+
+type TransactionUpdate = {
+  readonly category_id?: string | undefined;
+  readonly merchant_name?: string | undefined;
+  readonly goal_id?: string | undefined;
+  readonly amount?: number | undefined;
+  readonly date?: string | undefined;
+  readonly notes?: string | undefined;
+  readonly hidden_from_reports?: boolean | undefined;
+  readonly needs_review?: boolean | undefined;
+};
+
+interface BulkResult {
+  readonly transaction_id: string;
+  readonly status: 'updated' | 'ambiguous' | 'failed';
+  readonly error?: string;
+}
+
+type BulkPlan =
+  | { readonly kind: 'failed'; readonly result: BulkResult }
+  | {
+      readonly kind: 'write';
+      readonly transaction_id: string;
+      readonly expected: TransactionValues;
+      readonly undo: Extract<UndoStep, { operation: 'update_transaction' }>;
+    };
+
+function clientUpdate(update: TransactionUpdate): TransactionValues {
+  return {
+    ...(update.category_id !== undefined ? { categoryId: update.category_id } : {}),
+    ...(update.merchant_name !== undefined ? { merchantName: update.merchant_name } : {}),
+    ...(update.goal_id !== undefined ? { goalId: update.goal_id } : {}),
+    ...(update.amount !== undefined ? { amount: update.amount } : {}),
+    ...(update.date !== undefined ? { date: update.date } : {}),
+    ...(update.notes !== undefined ? { notes: update.notes } : {}),
+    ...(update.hidden_from_reports !== undefined
+      ? { hideFromReports: update.hidden_from_reports }
+      : {}),
+    ...(update.needs_review !== undefined ? { needsReview: update.needs_review } : {}),
+  };
+}
+
+function updateMatches(data: Record<string, unknown>, expected: TransactionValues): boolean {
+  const actual = transactionValues(data);
+  return Object.entries(expected).every(
+    ([key, value]) => actual[key as keyof TransactionValues] === value,
+  );
+}
+
+export function registerTransactionTools(
+  server: McpServer,
+  session: MonarchAccess,
+  changes: ChangeStore,
+): void {
   addTool(
     server,
     {
@@ -42,6 +120,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
         is_recurring: z.boolean().optional(),
         imported_from_mint: z.boolean().optional(),
         synced_from_institution: z.boolean().optional(),
+        needs_review: z.boolean().optional(),
         detail: detailSchema,
       }),
       hints: READ_ONLY,
@@ -71,6 +150,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
           ...(args.synced_from_institution !== undefined
             ? { syncedFromInstitution: args.synced_from_institution }
             : {}),
+          ...(args.needs_review !== undefined ? { needsReview: args.needs_review } : {}),
         }),
       );
       const total = response.allTransactions.totalCount;
@@ -206,18 +286,78 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: CREATE,
     },
     async (args) => {
-      const data = await session.write((client) =>
-        client.createTransaction({
-          date: args.date,
-          accountId: args.account_id,
-          amount: args.amount,
-          merchantName: args.merchant_name,
-          categoryId: args.category_id,
-          ...(args.notes !== undefined ? { notes: args.notes } : {}),
-          updateBalance: args.update_account_balance,
-        }),
+      const account = args.update_account_balance
+        ? (await session.read((client) => client.getAccounts())).accounts.find(
+            ({ id }) => id === args.account_id,
+          )
+        : undefined;
+      if (args.update_account_balance && !account) {
+        throw new Error(`Account ${args.account_id} was not found`);
+      }
+      const request = {
+        date: args.date,
+        accountId: args.account_id,
+        amount: args.amount,
+        merchantName: args.merchant_name,
+        categoryId: args.category_id,
+        ...(args.notes !== undefined ? { notes: args.notes } : {}),
+        updateBalance: args.update_account_balance,
+      };
+      const accountUndo: UndoStep[] = account
+        ? [
+            {
+              operation: 'update_account',
+              id: account.id,
+              values: { accountBalance: account.displayBalance },
+            },
+          ]
+        : [];
+      const { value: data, change } = await journalMutation(
+        changes,
+        {
+          tool: 'create_transaction',
+          affected_count: account ? 2 : 1,
+          reversible: false,
+          reversibility_reason: 'The created transaction ID is not known until Monarch responds.',
+          undo: accountUndo,
+          snapshot: { request },
+        },
+        () => session.write((client) => client.createTransaction(request)),
+        (result) => {
+          const id = result.createTransaction.transaction?.id;
+          if (!id) throw new Error('Monarch did not create the transaction');
+          return {
+            reversible: true,
+            reversibility_reason: null,
+            undo: [...accountUndo, { operation: 'delete_transaction', id }],
+            guards: [
+              {
+                kind: 'transaction',
+                id,
+                values: {
+                  date: args.date,
+                  amount: args.amount,
+                  merchantName: args.merchant_name,
+                  categoryId: args.category_id,
+                  goalId: '',
+                  notes: args.notes ?? '',
+                  hideFromReports: false,
+                  needsReview: false,
+                },
+                tagIds: [],
+                splits: [],
+              },
+            ],
+          };
+        },
       );
-      return { data, summary: `Created transaction for ${args.merchant_name}.` };
+      const transactionId = data.createTransaction.transaction?.id;
+      if (!transactionId) throw new Error(`Monarch did not create the transaction`);
+      return {
+        data: { ...data, change_id: change.id },
+        summary: `Created transaction for ${args.merchant_name}; undo with ${change.id}.`,
+        change: { id: change.id, affectedCount: account ? 2 : 1, reversible: true },
+      };
     },
   );
 
@@ -230,14 +370,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
         'Update only the supplied transaction fields: category, merchant, goal, amount, date, notes, report visibility, or review state.',
       inputSchema: z.object({
         transaction_id: transactionId,
-        category_id: categoryId.optional(),
-        merchant_name: z.string().min(1).optional(),
-        goal_id: z.string().min(1).optional(),
-        amount: z.number().optional(),
-        date: dateSchema.optional(),
-        notes: z.string().optional(),
-        hidden_from_reports: z.boolean().optional(),
-        needs_review: z.boolean().optional(),
+        ...transactionUpdateShape,
       }),
       hints: UPDATE,
     },
@@ -245,21 +378,177 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       if (Object.values(updates).every((value) => value === undefined)) {
         invalidInput('At least one transaction field must be supplied');
       }
-      const data = await session.write((client) =>
-        client.updateTransaction(transaction_id, {
-          ...(updates.category_id !== undefined ? { categoryId: updates.category_id } : {}),
-          ...(updates.merchant_name !== undefined ? { merchantName: updates.merchant_name } : {}),
-          ...(updates.goal_id !== undefined ? { goalId: updates.goal_id } : {}),
-          ...(updates.amount !== undefined ? { amount: updates.amount } : {}),
-          ...(updates.date !== undefined ? { date: updates.date } : {}),
-          ...(updates.notes !== undefined ? { notes: updates.notes } : {}),
-          ...(updates.hidden_from_reports !== undefined
-            ? { hideFromReports: updates.hidden_from_reports }
+      const before = await session.read((client) => client.getTransactionDetails(transaction_id));
+      const expected = clientUpdate(updates);
+      const prepared = changes.prepare({
+        tool: 'update_transaction',
+        affected_count: 1,
+        reversible: true,
+        undo: [
+          {
+            operation: 'update_transaction',
+            id: transaction_id,
+            values: transactionValues(before),
+          },
+        ],
+      });
+      let data: unknown;
+      let writeError: unknown;
+      try {
+        data = await session.write((client) => client.updateTransaction(transaction_id, expected));
+      } catch (error) {
+        writeError = error;
+      }
+      let verified = false;
+      let guard: TransactionGuard | undefined;
+      try {
+        const after = await session.read((client) => client.getTransactionDetails(transaction_id));
+        verified = updateMatches(after, expected);
+        if (verified) guard = transactionGuard(after);
+      } catch {
+        // The inverse is still recorded because the write may have reached Monarch.
+      }
+      const change = activatePrepared(changes, prepared.id, {
+        guards: guard ? [guard] : [],
+      });
+      return {
+        data: {
+          result: data,
+          change_id: change.id,
+          status: verified ? 'updated' : 'ambiguous',
+          ...(writeError
+            ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
             : {}),
-          ...(updates.needs_review !== undefined ? { needsReview: updates.needs_review } : {}),
-        }),
+        },
+        summary: verified
+          ? `Updated transaction ${transaction_id}; undo with ${change.id}.`
+          : `Transaction ${transaction_id} could not be verified after the write; restore with ${change.id}.`,
+        change: { id: change.id, affectedCount: 1, reversible: true },
+      };
+    },
+  );
+
+  addTool(
+    server,
+    {
+      name: 'bulk_update_transactions',
+      title: 'Bulk update transactions',
+      description:
+        'Apply explicit field changes to up to 500 transactions, verify each result, and record one reversible change. Returns per-transaction outcomes.',
+      inputSchema: z.object({
+        updates: z
+          .array(z.object({ transaction_id: transactionId, ...transactionUpdateShape }))
+          .min(1)
+          .max(500),
+      }),
+      hints: UPDATE,
+    },
+    async ({ updates }) => {
+      if (new Set(updates.map(({ transaction_id }) => transaction_id)).size !== updates.length) {
+        invalidInput('Each transaction_id may appear only once');
+      }
+      const plans: BulkPlan[] = await mapConcurrent(
+        updates,
+        8,
+        async ({ transaction_id, ...fields }) => {
+          if (Object.values(fields).every((value) => value === undefined)) {
+            return {
+              kind: 'failed' as const,
+              result: {
+                transaction_id,
+                status: 'failed' as const,
+                error: 'At least one transaction field must be supplied',
+              },
+            };
+          }
+          try {
+            const before = await session.read((client) =>
+              client.getTransactionDetails(transaction_id),
+            );
+            return {
+              kind: 'write' as const,
+              transaction_id,
+              expected: clientUpdate(fields),
+              undo: {
+                operation: 'update_transaction' as const,
+                id: transaction_id,
+                values: transactionValues(before),
+              },
+            };
+          } catch (error) {
+            return {
+              kind: 'failed' as const,
+              result: {
+                transaction_id,
+                status: 'failed' as const,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+        },
       );
-      return { data, summary: `Updated transaction ${transaction_id}.` };
+      const writable = plans.filter((plan) => plan.kind === 'write');
+      const prepared = writable.length
+        ? changes.prepare({
+            tool: 'bulk_update_transactions',
+            affected_count: writable.length,
+            reversible: true,
+            undo: writable.map(({ undo }) => undo),
+          })
+        : undefined;
+      const outcomes = await mapConcurrent(plans, 4, async (plan) => {
+        if (plan.kind === 'failed') return { result: plan.result, guard: undefined };
+        const { transaction_id, expected } = plan;
+        let writeError: unknown;
+        try {
+          await session.write((client) => client.updateTransaction(transaction_id, expected));
+        } catch (error) {
+          writeError = error;
+        }
+        let verified = false;
+        let guard: TransactionGuard | undefined;
+        try {
+          const after = await session.read((client) =>
+            client.getTransactionDetails(transaction_id),
+          );
+          verified = updateMatches(after, expected);
+          if (verified) guard = transactionGuard(after);
+        } catch {
+          // Preserve the inverse for an outcome that cannot be read back.
+        }
+        return {
+          result: {
+            transaction_id,
+            status: verified ? ('updated' as const) : ('ambiguous' as const),
+            ...(writeError
+              ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
+              : {}),
+          },
+          guard,
+        };
+      });
+      const results: BulkResult[] = outcomes.map(({ result }) => result);
+      const updatedCount = results.filter(({ status }) => status === 'updated').length;
+      const ambiguousCount = results.filter(({ status }) => status === 'ambiguous').length;
+      const failedCount = results.filter(({ status }) => status === 'failed').length;
+      const change = prepared
+        ? activatePrepared(changes, prepared.id, {
+            guards: outcomes.flatMap((outcome) => (outcome.guard ? [outcome.guard] : [])),
+          })
+        : undefined;
+      return {
+        data: {
+          results,
+          updated_count: updatedCount,
+          ambiguous_count: ambiguousCount,
+          failed_count: failedCount,
+          ...(change ? { change_id: change.id } : {}),
+        },
+        summary: `Verified ${updatedCount}, ambiguous ${ambiguousCount}, and failed ${failedCount} of ${results.length} transaction updates${change ? `; undo attempted writes with ${change.id}` : ''}.`,
+        ...(change
+          ? { change: { id: change.id, affectedCount: writable.length, reversible: true } }
+          : {}),
+      };
     },
   );
 
@@ -273,10 +562,28 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: REMOVE,
     },
     async ({ transaction_id }) => {
-      const deleted = await session.write((client) => client.deleteTransaction(transaction_id));
+      const details = await session.read((client) => client.getTransactionDetails(transaction_id));
+      const { value: deleted, change } = await journalMutation(
+        changes,
+        {
+          tool: 'delete_transaction',
+          affected_count: 1,
+          reversible: false,
+          reversibility_reason:
+            'A recreated transaction receives a new ID and may not preserve synced-account semantics.',
+          undo: [],
+          snapshot: { details },
+        },
+        () => session.write((client) => client.deleteTransaction(transaction_id)),
+        (result) => {
+          if (!result) throw new Error(`Monarch did not delete transaction ${transaction_id}`);
+          return {};
+        },
+      );
       return {
-        data: { deleted, transaction_id },
-        summary: `Deleted transaction ${transaction_id}.`,
+        data: { deleted, transaction_id, change_id: change.id },
+        summary: `Deleted transaction ${transaction_id}; recorded as ${change.id} (not automatically reversible).`,
+        change: { id: change.id, affectedCount: 1, reversible: false },
       };
     },
   );
@@ -301,19 +608,38 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: UPDATE,
     },
     async ({ transaction_id, splits }) => {
-      const data = await session.write((client) =>
-        client.updateTransactionSplits(
-          transaction_id,
-          splits.map((split) => ({
-            merchantName: split.merchant_name,
-            amount: split.amount,
-            categoryId: split.category_id,
-          })),
-        ),
+      const before = await session.read((client) => client.getTransactionSplits(transaction_id));
+      const requestedSplits = splits.map((split) => ({
+        merchantName: split.merchant_name,
+        amount: split.amount,
+        categoryId: split.category_id,
+      }));
+      const { value: data, change } = await journalMutation(
+        changes,
+        {
+          tool: 'set_transaction_splits',
+          affected_count: 1,
+          reversible: true,
+          undo: [
+            {
+              operation: 'set_transaction_splits',
+              id: transaction_id,
+              splits: transactionSplitValues(before),
+            },
+          ],
+        },
+        () =>
+          session.write((client) =>
+            client.updateTransactionSplits(transaction_id, requestedSplits),
+          ),
+        () => ({
+          guards: [{ kind: 'transaction', id: transaction_id, splits: requestedSplits }],
+        }),
       );
       return {
-        data,
-        summary: `Set ${splits.length} split legs on transaction ${transaction_id}.`,
+        data: { ...data, change_id: change.id },
+        summary: `Set ${splits.length} split legs on transaction ${transaction_id}; undo with ${change.id}.`,
+        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -332,10 +658,24 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: UPDATE,
     },
     async ({ transaction_id, tag_ids }) => {
-      const data = await session.write((client) =>
-        client.setTransactionTags(transaction_id, tag_ids),
+      const before = await session.read((client) => client.getTransactionDetails(transaction_id));
+      const oldTags = transactionTagIds(before);
+      const { value: data, change } = await journalMutation(
+        changes,
+        {
+          tool: 'set_transaction_tags',
+          affected_count: 1,
+          reversible: true,
+          undo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: oldTags }],
+        },
+        () => session.write((client) => client.setTransactionTags(transaction_id, tag_ids)),
+        () => ({ guards: [{ kind: 'transaction', id: transaction_id, tagIds: tag_ids }] }),
       );
-      return { data, summary: `Set ${tag_ids.length} tags on transaction ${transaction_id}.` };
+      return {
+        data: { ...data, change_id: change.id },
+        summary: `Set ${tag_ids.length} tags on transaction ${transaction_id}; undo with ${change.id}.`,
+        change: { id: change.id, affectedCount: 1, reversible: true },
+      };
     },
   );
 
@@ -355,8 +695,35 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: CREATE,
     },
     async ({ name, color }) => {
-      const data = await session.write((client) => client.createTransactionTag(name, color));
-      return { data, summary: `Created transaction tag "${name}".` };
+      const { value: data, change } = await journalMutation(
+        changes,
+        {
+          tool: 'create_transaction_tag',
+          affected_count: 1,
+          reversible: false,
+          reversibility_reason: 'The created tag ID is not known until Monarch responds.',
+          undo: [],
+          snapshot: { name, color },
+        },
+        () => session.write((client) => client.createTransactionTag(name, color)),
+        (result) => {
+          const created = result.createTransactionTag.tag;
+          if (!created) throw new Error(`Monarch did not create transaction tag "${name}"`);
+          return {
+            reversible: true,
+            reversibility_reason: null,
+            undo: [{ operation: 'delete_transaction_tag', id: created.id }],
+            guards: [{ kind: 'tag', id: created.id, name, color }],
+          };
+        },
+      );
+      const tag = data.createTransactionTag.tag;
+      if (!tag) throw new Error(`Monarch did not create transaction tag "${name}"`);
+      return {
+        data: { ...data, change_id: change.id },
+        summary: `Created transaction tag "${name}"; undo with ${change.id}.`,
+        change: { id: change.id, affectedCount: 1, reversible: true },
+      };
     },
   );
 
@@ -370,8 +737,31 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: REMOVE,
     },
     async ({ tag_id }) => {
-      await session.write((client) => client.deleteTransactionTag(tag_id));
-      return { data: { deleted: true, tag_id }, summary: `Deleted transaction tag ${tag_id}.` };
+      const tag = (await session.read((client) => client.getTransactionTags())).tags.find(
+        ({ id }) => id === tag_id,
+      );
+      if (!tag) throw new Error(`Transaction tag ${tag_id} was not found`);
+      const affected = await session.read((client) =>
+        client.getAllTransactions({ tagIds: [tag_id], pageSize: 500 }),
+      );
+      const { change } = await journalMutation(
+        changes,
+        {
+          tool: 'delete_transaction_tag',
+          affected_count: 1 + affected.length,
+          reversible: false,
+          reversibility_reason:
+            'Recreating a tag gives it a new ID and cannot restore its transaction links atomically.',
+          undo: [],
+          snapshot: { tag, transaction_ids: affected.map(({ id }) => id) },
+        },
+        () => session.write((client) => client.deleteTransactionTag(tag_id)),
+      );
+      return {
+        data: { deleted: true, tag_id, change_id: change.id },
+        summary: `Deleted transaction tag ${tag_id}; recorded as ${change.id} (not automatically reversible).`,
+        change: { id: change.id, affectedCount: 1 + affected.length, reversible: false },
+      };
     },
   );
 
@@ -391,18 +781,42 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: CREATE,
     },
     async ({ group_id, name, icon, rollover_start_month, rollover_enabled }) => {
-      const data = await session.write((client) =>
-        client.createTransactionCategory({
-          groupId: group_id,
-          name,
-          ...(icon !== undefined ? { icon } : {}),
-          ...(rollover_start_month !== undefined
-            ? { rolloverStartMonth: rollover_start_month }
-            : {}),
-          rolloverEnabled: rollover_enabled,
-        }),
+      const request = {
+        groupId: group_id,
+        name,
+        ...(icon !== undefined ? { icon } : {}),
+        ...(rollover_start_month !== undefined ? { rolloverStartMonth: rollover_start_month } : {}),
+        rolloverEnabled: rollover_enabled,
+      };
+      const { value: data, change } = await journalMutation(
+        changes,
+        {
+          tool: 'create_transaction_category',
+          affected_count: 1,
+          reversible: false,
+          reversibility_reason: 'The created category ID is not known until Monarch responds.',
+          undo: [],
+          snapshot: { request },
+        },
+        () => session.write((client) => client.createTransactionCategory(request)),
+        (result) => {
+          const created = result.createCategory.category;
+          if (!created) throw new Error(`Monarch did not create transaction category "${name}"`);
+          return {
+            reversible: true,
+            reversibility_reason: null,
+            undo: [{ operation: 'delete_transaction_category', id: created.id }],
+            guards: [{ kind: 'category', id: created.id, name, groupId: group_id }],
+          };
+        },
       );
-      return { data, summary: `Created transaction category "${name}".` };
+      const category = data.createCategory.category;
+      if (!category) throw new Error(`Monarch did not create transaction category "${name}"`);
+      return {
+        data: { ...data, change_id: change.id },
+        summary: `Created transaction category "${name}"; undo with ${change.id}.`,
+        change: { id: change.id, affectedCount: 1, reversible: true },
+      };
     },
   );
 
@@ -420,10 +834,42 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
       hints: REMOVE,
     },
     async ({ category_id, move_to_category_id }) => {
-      const deleted = await session.write((client) =>
-        client.deleteTransactionCategory(category_id, move_to_category_id),
+      const category = (
+        await session.read((client) => client.getTransactionCategories())
+      ).categories.find(({ id }) => id === category_id);
+      if (!category) throw new Error(`Transaction category ${category_id} was not found`);
+      const affected = await session.read((client) =>
+        client.getAllTransactions({ categoryIds: [category_id], pageSize: 500 }),
       );
-      return { data: { deleted, category_id }, summary: `Deleted category ${category_id}.` };
+      const { value: deleted, change } = await journalMutation(
+        changes,
+        {
+          tool: 'delete_transaction_category',
+          affected_count: 1 + affected.length,
+          reversible: false,
+          reversibility_reason:
+            'Recreating a category gives it a new ID and cannot atomically restore moved transaction links.',
+          undo: [],
+          snapshot: {
+            category,
+            move_to_category_id: move_to_category_id ?? null,
+            transaction_ids: affected.map(({ id }) => id),
+          },
+        },
+        () =>
+          session.write((client) =>
+            client.deleteTransactionCategory(category_id, move_to_category_id),
+          ),
+        (result) => {
+          if (!result) throw new Error(`Monarch did not delete category ${category_id}`);
+          return {};
+        },
+      );
+      return {
+        data: { deleted, category_id, change_id: change.id },
+        summary: `Deleted category ${category_id}; recorded as ${change.id} (not automatically reversible).`,
+        change: { id: change.id, affectedCount: 1 + affected.length, reversible: false },
+      };
     },
   );
 }

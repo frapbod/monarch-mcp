@@ -50,6 +50,11 @@ export interface ToolPayload {
   readonly data: unknown;
   readonly summary: string;
   readonly page?: PageMetadata;
+  readonly change?: {
+    readonly id: string;
+    readonly affectedCount: number;
+    readonly reversible: boolean;
+  };
 }
 
 export interface ToolHints {
@@ -144,6 +149,13 @@ export function addTool<Shape extends z.ZodRawShape>(
           readOnly: spec.hints.readOnlyHint,
           destructive: spec.hints.destructiveHint,
           idempotent: spec.hints.idempotentHint,
+          ...(result.change
+            ? {
+                changeId: result.change.id,
+                affectedCount: result.change.affectedCount,
+                reversible: result.change.reversible,
+              }
+            : {}),
         });
         return response;
       } catch (error) {
