@@ -1,6 +1,6 @@
 # Monarch MCP Context
 
-This repository is the first-party Monarch Money MCP used by Hermes.
+This repository contains a TypeScript MCP server for Monarch Money.
 
 ## Contract
 
@@ -24,4 +24,3 @@ This repository is the first-party Monarch Money MCP used by Hermes.
 - `src/tool.ts`: one MCP result and error contract
 - `src/tools/`: responsibility-focused tool registration
 - `src/server.ts`: factory and stdio lifecycle only
-

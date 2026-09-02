@@ -81,9 +81,8 @@ make check
 ```
 
 The check runs formatting, lint, strict type checking, behavior tests, and a
-production build. Live Monarch integration checks
-are performed during the Hermes image rollout because CI has no personal
-account credentials.
+production build. Live Monarch integration checks run separately because CI
+has no account credentials.
 
 ## Status
 
