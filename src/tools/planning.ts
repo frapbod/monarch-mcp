@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import type { MonarchAccess } from '../session.js';
-import { READ_ONLY, UPDATE, addTool, assertDateRange, dateSchema } from '../tool.js';
+import { READ_ONLY, UPDATE, addTool, assertDateRange, dateSchema, invalidInput } from '../tool.js';
 
 const rangeSchema = z.object({
   start_date: dateSchema.optional(),
@@ -45,7 +45,7 @@ export function registerPlanningTools(server: McpServer, session: MonarchAccess)
     },
     async ({ amount, category_id, category_group_id, start_date, apply_to_future }) => {
       if ((category_id === undefined) === (category_group_id === undefined)) {
-        throw new Error('Supply exactly one of category_id or category_group_id');
+        invalidInput('Supply exactly one of category_id or category_group_id');
       }
       const data = await session.write((client) =>
         client.setBudgetAmount({

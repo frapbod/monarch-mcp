@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import { classifyError, emitToolEvent } from './events.js';
+import { InputValidationError } from './errors.js';
 
 export const detailSchema = z
   .enum(['compact', 'full'])
@@ -12,8 +13,12 @@ export const dateSchema = z.iso.date().describe('Date in YYYY-MM-DD format');
 
 export function assertDateRange(startDate?: string, endDate?: string): void {
   if (Boolean(startDate) !== Boolean(endDate)) {
-    throw new Error('Supply both start_date and end_date, or omit both');
+    throw new InputValidationError('Supply both start_date and end_date, or omit both');
   }
+}
+
+export function invalidInput(message: string): never {
+  throw new InputValidationError(message);
 }
 
 const pageSchema = z.object({

@@ -12,6 +12,7 @@ import {
   assertDateRange,
   dateSchema,
   detailSchema,
+  invalidInput,
 } from '../tool.js';
 
 const transactionId = z.string().min(1).describe('Monarch transaction ID');
@@ -242,7 +243,7 @@ export function registerTransactionTools(server: McpServer, session: MonarchAcce
     },
     async ({ transaction_id, ...updates }) => {
       if (Object.values(updates).every((value) => value === undefined)) {
-        throw new Error('At least one transaction field must be supplied');
+        invalidInput('At least one transaction field must be supplied');
       }
       const data = await session.write((client) =>
         client.updateTransaction(transaction_id, {
