@@ -1,6 +1,6 @@
 {
   "name": "@frapbod/monarch-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fast, agent-friendly MCP server for Monarch Money",
   "type": "module",
   "bin": {

@@ -28,6 +28,9 @@ import {
   dateSchema,
   detailSchema,
   invalidInput,
+  reportProgress,
+  requestCancelled,
+  throwIfCancelled,
 } from '../tool.js';
 
 const transactionId = z.string().min(1).describe('Monarch transaction ID');
@@ -57,7 +60,7 @@ type TransactionUpdate = {
 
 interface BulkResult {
   readonly transaction_id: string;
-  readonly status: 'updated' | 'ambiguous' | 'failed';
+  readonly status: 'updated' | 'ambiguous' | 'failed' | 'cancelled';
   readonly error?: string;
 }
 
@@ -443,16 +446,23 @@ export function registerTransactionTools(
       }),
       hints: UPDATE,
     },
-    async ({ updates }) => {
+    async ({ updates }, context) => {
+      throwIfCancelled(context);
       if (new Set(updates.map(({ transaction_id }) => transaction_id)).size !== updates.length) {
         invalidInput('Each transaction_id may appear only once');
       }
+      let preparedCount = 0;
       const plans: BulkPlan[] = await mapConcurrent(
         updates,
         8,
         async ({ transaction_id, ...fields }) => {
+          throwIfCancelled(
+            context,
+            `Bulk update cancelled while preparing transaction ${preparedCount + 1} of ${updates.length}`,
+          );
+          let plan: BulkPlan;
           if (Object.values(fields).every((value) => value === undefined)) {
-            return {
+            plan = {
               kind: 'failed' as const,
               result: {
                 transaction_id,
@@ -460,33 +470,43 @@ export function registerTransactionTools(
                 error: 'At least one transaction field must be supplied',
               },
             };
-          }
-          try {
-            const before = await session.read((client) =>
-              client.getTransactionDetails(transaction_id),
-            );
-            return {
-              kind: 'write' as const,
-              transaction_id,
-              expected: clientUpdate(fields),
-              undo: {
-                operation: 'update_transaction' as const,
-                id: transaction_id,
-                values: transactionValues(before),
-              },
-            };
-          } catch (error) {
-            return {
-              kind: 'failed' as const,
-              result: {
+          } else {
+            try {
+              const before = await session.read((client) =>
+                client.getTransactionDetails(transaction_id),
+              );
+              plan = {
+                kind: 'write' as const,
                 transaction_id,
-                status: 'failed' as const,
-                error: error instanceof Error ? error.message : String(error),
-              },
-            };
+                expected: clientUpdate(fields),
+                undo: {
+                  operation: 'update_transaction' as const,
+                  id: transaction_id,
+                  values: transactionValues(before),
+                },
+              };
+            } catch (error) {
+              plan = {
+                kind: 'failed' as const,
+                result: {
+                  transaction_id,
+                  status: 'failed' as const,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              };
+            }
           }
+          preparedCount += 1;
+          await reportProgress(
+            context,
+            preparedCount,
+            updates.length * 2,
+            `Prepared ${preparedCount} of ${updates.length} transaction updates`,
+          );
+          return plan;
         },
       );
+      throwIfCancelled(context, 'Bulk update cancelled before any Monarch changes were attempted');
       const writable = plans.filter((plan) => plan.kind === 'write');
       const prepared = writable.length
         ? changes.prepare({
@@ -496,57 +516,90 @@ export function registerTransactionTools(
             undo: writable.map(({ undo }) => undo),
           })
         : undefined;
+      let processedCount = 0;
       const outcomes = await mapConcurrent(plans, 4, async (plan) => {
-        if (plan.kind === 'failed') return { result: plan.result, guard: undefined };
-        const { transaction_id, expected } = plan;
-        let writeError: unknown;
-        try {
-          await session.write((client) => client.updateTransaction(transaction_id, expected));
-        } catch (error) {
-          writeError = error;
-        }
-        let verified = false;
-        let guard: TransactionGuard | undefined;
-        try {
-          const after = await session.read((client) =>
-            client.getTransactionDetails(transaction_id),
-          );
-          verified = updateMatches(after, expected);
-          if (verified) guard = transactionGuard(after);
-        } catch {
-          // Preserve the inverse for an outcome that cannot be read back.
-        }
-        return {
-          result: {
-            transaction_id,
-            status: verified ? ('updated' as const) : ('ambiguous' as const),
-            ...(writeError
-              ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
-              : {}),
-          },
-          guard,
+        let outcome: {
+          result: BulkResult;
+          guard?: TransactionGuard;
+          undo?: UndoStep;
+          attempted: boolean;
         };
+        if (plan.kind === 'failed') {
+          outcome = { result: plan.result, attempted: false };
+        } else if (requestCancelled(context)) {
+          outcome = {
+            result: { transaction_id: plan.transaction_id, status: 'cancelled' },
+            attempted: false,
+          };
+        } else {
+          const { transaction_id, expected } = plan;
+          let writeError: unknown;
+          try {
+            await session.write((client) => client.updateTransaction(transaction_id, expected));
+          } catch (error) {
+            writeError = error;
+          }
+          let verified = false;
+          let guard: TransactionGuard | undefined;
+          try {
+            const after = await session.read((client) =>
+              client.getTransactionDetails(transaction_id),
+            );
+            verified = updateMatches(after, expected);
+            if (verified) guard = transactionGuard(after);
+          } catch {
+            // Preserve the inverse for an outcome that cannot be read back.
+          }
+          outcome = {
+            result: {
+              transaction_id,
+              status: verified ? ('updated' as const) : ('ambiguous' as const),
+              ...(writeError
+                ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
+                : {}),
+            },
+            ...(guard ? { guard } : {}),
+            undo: plan.undo,
+            attempted: true,
+          };
+        }
+        processedCount += 1;
+        await reportProgress(
+          context,
+          updates.length + processedCount,
+          updates.length * 2,
+          `Processed ${processedCount} of ${updates.length} transaction updates`,
+        );
+        return outcome;
       });
       const results: BulkResult[] = outcomes.map(({ result }) => result);
       const updatedCount = results.filter(({ status }) => status === 'updated').length;
       const ambiguousCount = results.filter(({ status }) => status === 'ambiguous').length;
       const failedCount = results.filter(({ status }) => status === 'failed').length;
-      const change = prepared
+      const cancelledCount = results.filter(({ status }) => status === 'cancelled').length;
+      const attempted = outcomes.filter(({ attempted }) => attempted);
+      const active = prepared
         ? activatePrepared(changes, prepared.id, {
-            guards: outcomes.flatMap((outcome) => (outcome.guard ? [outcome.guard] : [])),
+            affected_count: attempted.length,
+            undo: attempted.flatMap((outcome) => (outcome.undo ? [outcome.undo] : [])),
+            guards: attempted.flatMap((outcome) => (outcome.guard ? [outcome.guard] : [])),
           })
         : undefined;
+      const change = active && attempted.length ? active : undefined;
+      if (active && !change) changes.markUndone(active.id);
       return {
         data: {
           results,
           updated_count: updatedCount,
           ambiguous_count: ambiguousCount,
           failed_count: failedCount,
+          cancelled_count: cancelledCount,
           ...(change ? { change_id: change.id } : {}),
         },
-        summary: `Verified ${updatedCount}, ambiguous ${ambiguousCount}, and failed ${failedCount} of ${results.length} transaction updates${change ? `; undo attempted writes with ${change.id}` : ''}.`,
+        summary: `Verified ${updatedCount}, ambiguous ${ambiguousCount}, failed ${failedCount}, and cancelled ${cancelledCount} of ${results.length} transaction updates${change ? `; undo attempted writes with ${change.id}` : ''}.`,
+        cancelled: cancelledCount > 0 || requestCancelled(context),
         ...(change
-          ? { change: { id: change.id, affectedCount: writable.length, reversible: true } }
+          ? { change: { id: change.id, affectedCount: attempted.length, reversible: true } }
           : {}),
       };
     },

@@ -2,13 +2,15 @@ import type {
   RuleAmountCriterion,
   RuleCriterion,
   Transaction,
+  TransactionRule,
   TransactionRuleInput,
 } from '@hakimelek/monarchmoney';
-import type { McpServer } from '@modelcontextprotocol/server';
+import type { McpServer, ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import {
   activatePrepared,
+  type ChangeRecord,
   type ChangeGuard,
   type ChangeStore,
   type UndoStep,
@@ -19,7 +21,17 @@ import { compactTransaction } from '../projections.js';
 import { ruleDefinition, ruleInputFromApi, ruleRestoreInput } from '../rule-state.js';
 import type { MonarchAccess, MonarchClient } from '../session.js';
 import { transactionGuard, transactionUndoStep } from '../transaction-state.js';
-import { CREATE, READ_ONLY, REMOVE, UPDATE, addTool, invalidInput } from '../tool.js';
+import {
+  CREATE,
+  READ_ONLY,
+  REMOVE,
+  UPDATE,
+  addTool,
+  invalidInput,
+  reportProgress,
+  requestCancelled,
+  throwIfCancelled,
+} from '../tool.js';
 
 const criterionSchema = z.object({
   operator: z.enum(['contains', 'eq']),
@@ -70,6 +82,8 @@ const ruleShape = {
 };
 
 type RuleArguments = z.output<z.ZodObject<typeof ruleShape>>;
+
+const ruleProgressTotal = (matchCount: number): number => matchCount * 2 + 3;
 
 const criteriaKeys = [
   'merchant_criteria',
@@ -201,27 +215,119 @@ function matchesRule(transaction: Transaction, rule: TransactionRuleInput): bool
 async function matchingTransactions(
   session: MonarchAccess,
   rule: TransactionRuleInput,
+  context: ServerContext,
 ): Promise<Transaction[]> {
+  throwIfCancelled(context);
   const transactions = await session.read((client) => client.getAllTransactions({ pageSize: 500 }));
+  throwIfCancelled(context);
   return transactions.filter((transaction) => matchesRule(transaction, rule));
 }
 
 async function captureUndo(
   client: MonarchClient,
   transactions: Transaction[],
+  context: ServerContext,
 ): Promise<UndoStep[]> {
-  return mapConcurrent(transactions, 8, async (transaction) =>
-    transactionUndoStep(await client.getTransactionDetails(transaction.id)),
-  );
+  let captured = 0;
+  return mapConcurrent(transactions, 8, async (transaction) => {
+    throwIfCancelled(context);
+    const undo = transactionUndoStep(await client.getTransactionDetails(transaction.id));
+    throwIfCancelled(context);
+    captured += 1;
+    await reportProgress(
+      context,
+      captured + 1,
+      ruleProgressTotal(transactions.length),
+      `Saved prior state for ${captured} of ${transactions.length} transactions`,
+    );
+    return undo;
+  });
 }
 
 async function captureGuards(
   client: MonarchClient,
   transactions: Transaction[],
+  context: ServerContext,
 ): Promise<ChangeGuard[]> {
-  return mapConcurrent(transactions, 8, async (transaction) =>
-    transactionGuard(await client.getTransactionDetails(transaction.id)),
+  let captured = 0;
+  return mapConcurrent(transactions, 8, async (transaction) => {
+    const guard = transactionGuard(await client.getTransactionDetails(transaction.id));
+    captured += 1;
+    await reportProgress(
+      context,
+      transactions.length + captured + 2,
+      ruleProgressTotal(transactions.length),
+      `Verified ${captured} of ${transactions.length} changed transactions`,
+    );
+    return guard;
+  });
+}
+
+async function completeRuleChange(
+  changes: ChangeStore,
+  session: MonarchAccess,
+  context: ServerContext,
+  preparedId: string,
+  ruleId: string,
+  definition: TransactionRuleInput,
+  result: TransactionRule,
+  matches: Transaction[],
+  undo: UndoStep[],
+  appliedCount: number,
+): Promise<{ change: ChangeRecord; exactUndo: boolean }> {
+  const total = ruleProgressTotal(matches.length);
+  await reportProgress(
+    context,
+    matches.length + 2,
+    total,
+    appliedCount
+      ? `Monarch accepted the rule and applied it to ${appliedCount} existing transactions`
+      : 'Monarch accepted the rule',
   );
+  const countMatches = appliedCount === matches.length;
+  let guardsCaptured = true;
+  let guards: ChangeGuard[] = [
+    {
+      kind: 'rule',
+      id: ruleId,
+      value: ruleDefinition(definition),
+      ...(result.recentApplicationCount !== undefined
+        ? { recentApplicationCount: result.recentApplicationCount }
+        : {}),
+      ...(result.lastAppliedAt !== undefined ? { lastAppliedAt: result.lastAppliedAt } : {}),
+    },
+  ];
+  activatePrepared(changes, preparedId, {
+    affected_count: 1 + appliedCount,
+    reversible: countMatches,
+    reversibility_reason: countMatches
+      ? null
+      : "Monarch's applied count differed from the locally previewed transaction set.",
+    undo,
+    guards,
+  });
+  if (countMatches && matches.length) {
+    try {
+      guards = [
+        ...guards,
+        ...(await session.read((client) => captureGuards(client, matches, context))),
+      ];
+    } catch {
+      guardsCaptured = false;
+    }
+  }
+  await reportProgress(context, total, total, 'Saved the complete reversible change record');
+  const exactUndo = countMatches && guardsCaptured;
+  const change = activatePrepared(changes, preparedId, {
+    reversible: exactUndo,
+    reversibility_reason: exactUndo
+      ? null
+      : countMatches
+        ? "Monarch's applied transaction set could not be captured exactly after the rule ran."
+        : "Monarch's applied count differed from the locally previewed transaction set.",
+    guards,
+  });
+  return { change, exactUndo };
 }
 
 function requireCreateRule(args: RuleArguments): void {
@@ -267,9 +373,10 @@ export function registerRuleTools(
       inputSchema: z.object(ruleShape),
       hints: READ_ONLY,
     },
-    async (args) => {
+    async (args, context) => {
       const input = ruleInput(args);
-      const matches = await matchingTransactions(session, input);
+      const matches = await matchingTransactions(session, input, context);
+      await reportProgress(context, 1, 1, `Found ${matches.length} matching transactions`);
       return {
         data: {
           matching_count: matches.length,
@@ -291,15 +398,26 @@ export function registerRuleTools(
       inputSchema: z.object(ruleShape),
       hints: CREATE,
     },
-    async (args) => {
+    async (args, context) => {
       requireCreateRule(args);
       const input = ruleInput(args);
       const matches = input.applyToExistingTransactions
-        ? await matchingTransactions(session, input)
+        ? await matchingTransactions(session, input, context)
         : [];
+      if (input.applyToExistingTransactions) {
+        await reportProgress(
+          context,
+          1,
+          ruleProgressTotal(matches.length),
+          `Found ${matches.length} matching existing transactions`,
+        );
+      } else {
+        await reportProgress(context, 1, 3, 'Prepared the new rule definition');
+      }
       const historicalUndo = matches.length
-        ? await session.read((client) => captureUndo(client, matches))
+        ? await session.read((client) => captureUndo(client, matches, context))
         : [];
+      throwIfCancelled(context, 'Rule creation cancelled before Monarch was changed');
       const prepared = changes.prepare({
         tool: 'create_transaction_rule',
         affected_count: 1 + matches.length,
@@ -311,42 +429,21 @@ export function registerRuleTools(
       const created = await performPrepared(changes, prepared.id, () =>
         session.write((client) => client.createTransactionRule(input)),
       );
-      const appliedCount = created.recentApplicationCount ?? matches.length;
-      let exactUndo = !input.applyToExistingTransactions || appliedCount === matches.length;
-      let guards: ChangeGuard[] = [
-        {
-          kind: 'rule',
-          id: created.id,
-          value: ruleDefinition(input),
-          ...(created.recentApplicationCount !== undefined
-            ? { recentApplicationCount: created.recentApplicationCount }
-            : {}),
-          ...(created.lastAppliedAt !== undefined ? { lastAppliedAt: created.lastAppliedAt } : {}),
-        },
-      ];
-      activatePrepared(changes, prepared.id, {
-        affected_count: 1 + appliedCount,
-        reversible: exactUndo,
-        reversibility_reason: exactUndo
-          ? null
-          : "Monarch's applied count differed from the locally previewed transaction set.",
-        undo: [...historicalUndo, { operation: 'delete_transaction_rule', id: created.id }],
-        guards,
-      });
-      if (exactUndo && matches.length) {
-        try {
-          guards = [...guards, ...(await session.read((client) => captureGuards(client, matches)))];
-        } catch {
-          exactUndo = false;
-        }
-      }
-      const change = activatePrepared(changes, prepared.id, {
-        reversible: exactUndo,
-        reversibility_reason: exactUndo
-          ? null
-          : "Monarch's applied transaction set could not be captured exactly after the rule ran.",
-        guards,
-      });
+      const appliedCount = input.applyToExistingTransactions
+        ? (created.recentApplicationCount ?? matches.length)
+        : 0;
+      const { change, exactUndo } = await completeRuleChange(
+        changes,
+        session,
+        context,
+        prepared.id,
+        created.id,
+        input,
+        created,
+        matches,
+        [...historicalUndo, { operation: 'delete_transaction_rule', id: created.id }],
+        appliedCount,
+      );
       return {
         data: {
           rule: created,
@@ -354,7 +451,8 @@ export function registerRuleTools(
           historical_match_count: appliedCount,
           reversible: exactUndo,
         },
-        summary: `Created rule ${created.id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review because Monarch's applied count differed from the preview`}.`,
+        summary: `Created rule ${created.id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
+        cancelled: requestCancelled(context),
         change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },
@@ -370,7 +468,8 @@ export function registerRuleTools(
       inputSchema: z.object({ rule_id: z.string().min(1), ...ruleShape }),
       hints: UPDATE,
     },
-    async ({ rule_id, ...args }) => {
+    async ({ rule_id, ...args }, context) => {
+      throwIfCancelled(context);
       if (Object.values(args).every((value) => value === undefined)) {
         invalidInput('At least one rule field must be supplied');
       }
@@ -383,11 +482,22 @@ export function registerRuleTools(
       const requested = ruleInput(args);
       const merged = { ...before, ...requested };
       const matches = requested.applyToExistingTransactions
-        ? await matchingTransactions(session, merged)
+        ? await matchingTransactions(session, merged, context)
         : [];
+      if (requested.applyToExistingTransactions) {
+        await reportProgress(
+          context,
+          1,
+          ruleProgressTotal(matches.length),
+          `Found ${matches.length} matching existing transactions`,
+        );
+      } else {
+        await reportProgress(context, 1, 3, 'Prepared the rule update');
+      }
       const historicalUndo = matches.length
-        ? await session.read((client) => captureUndo(client, matches))
+        ? await session.read((client) => captureUndo(client, matches, context))
         : [];
+      throwIfCancelled(context, 'Rule update cancelled before Monarch was changed');
       const prepared = changes.prepare({
         tool: 'update_transaction_rule',
         affected_count: 1 + matches.length,
@@ -405,40 +515,18 @@ export function registerRuleTools(
       const appliedCount = requested.applyToExistingTransactions
         ? (updated.recentApplicationCount ?? matches.length)
         : 0;
-      let exactUndo = !requested.applyToExistingTransactions || appliedCount === matches.length;
-      let guards: ChangeGuard[] = [
-        {
-          kind: 'rule',
-          id: rule_id,
-          value: ruleDefinition(merged),
-          ...(updated.recentApplicationCount !== undefined
-            ? { recentApplicationCount: updated.recentApplicationCount }
-            : {}),
-          ...(updated.lastAppliedAt !== undefined ? { lastAppliedAt: updated.lastAppliedAt } : {}),
-        },
-      ];
-      activatePrepared(changes, prepared.id, {
-        affected_count: 1 + appliedCount,
-        reversible: exactUndo,
-        reversibility_reason: exactUndo
-          ? null
-          : "Monarch's applied count differed from the locally previewed transaction set.",
-        guards,
-      });
-      if (exactUndo && matches.length) {
-        try {
-          guards = [...guards, ...(await session.read((client) => captureGuards(client, matches)))];
-        } catch {
-          exactUndo = false;
-        }
-      }
-      const change = activatePrepared(changes, prepared.id, {
-        reversible: exactUndo,
-        reversibility_reason: exactUndo
-          ? null
-          : "Monarch's applied transaction set could not be captured exactly after the rule ran.",
-        guards,
-      });
+      const { change, exactUndo } = await completeRuleChange(
+        changes,
+        session,
+        context,
+        prepared.id,
+        rule_id,
+        merged,
+        updated,
+        matches,
+        [...historicalUndo, { operation: 'update_transaction_rule', id: rule_id, values: restore }],
+        appliedCount,
+      );
       return {
         data: {
           rule: updated,
@@ -446,7 +534,8 @@ export function registerRuleTools(
           historical_match_count: appliedCount,
           reversible: exactUndo,
         },
-        summary: `Updated rule ${rule_id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review because Monarch's applied count differed from the preview`}.`,
+        summary: `Updated rule ${rule_id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
+        cancelled: requestCancelled(context),
         change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },

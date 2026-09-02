@@ -7,7 +7,7 @@ import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 
-import { AuthenticationError, InputValidationError } from '../src/errors.js';
+import { AuthenticationError, InputValidationError, RequestCancelledError } from '../src/errors.js';
 import { classifyError } from '../src/events.js';
 import { createServer } from '../src/server.js';
 import type { MonarchAccess, MonarchClient } from '../src/session.js';
@@ -15,6 +15,7 @@ import type { MonarchAccess, MonarchClient } from '../src/session.js';
 test('classifies local and upstream failures accurately', () => {
   assert.equal(classifyError(new InputValidationError('invalid')), 'validation');
   assert.equal(classifyError(new AuthenticationError('denied')), 'authentication');
+  assert.equal(classifyError(new RequestCancelledError('cancelled')), 'cancelled');
   assert.equal(classifyError(Object.assign(new Error('request'), { statusCode: 429 })), 'http_429');
   assert.equal(classifyError(new Error('response shape changed')), 'upstream');
 });
@@ -62,13 +63,21 @@ test('tool events record outcomes and latency without arguments, results, or raw
     };
     assert.equal(await invoke(failure, 'sentinel-account-id'), true);
 
+    const cancelled: MonarchAccess = {
+      read: async () => {
+        throw new RequestCancelledError('sentinel cancellation');
+      },
+      write: async (operation) => operation({} as MonarchClient),
+    };
+    assert.equal(await invoke(cancelled, 'sentinel-account-id'), true);
+
     const raw = readFileSync(path, 'utf8');
     assert.doesNotMatch(raw, /sentinel/);
     const events = raw
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line));
-    assert.equal(events.length, 2);
+    assert.equal(events.length, 3);
     assert.deepEqual(
       events.map(({ event, tool, outcome, error_kind }) => ({
         event,
@@ -88,6 +97,12 @@ test('tool events record outcomes and latency without arguments, results, or raw
           tool: 'get_account_history',
           outcome: 'error',
           error_kind: 'http_400',
+        },
+        {
+          event: 'monarch_mcp.tool.completed',
+          tool: 'get_account_history',
+          outcome: 'cancelled',
+          error_kind: 'cancelled',
         },
       ],
     );

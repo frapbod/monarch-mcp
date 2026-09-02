@@ -96,6 +96,13 @@ annotations accurately distinguish reads, updates, creates, and deletes so the
 host can apply its normal interaction policy without making the toolset less
 useful.
 
+Account refreshes, bulk transaction updates, retroactive rules, and undo emit
+standard MCP progress notifications. Standard cancellation stops work before a
+write when possible, bounds already-started transaction writes to the existing
+concurrency limit, and records the exact attempted set. If Monarch has already
+accepted a retroactive rule, the server finishes its recovery journal before
+stopping so a disconnected caller cannot leave an untracked change.
+
 ## Development
 
 ```bash

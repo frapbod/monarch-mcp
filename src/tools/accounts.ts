@@ -14,6 +14,8 @@ import {
   dateSchema,
   detailSchema,
   invalidInput,
+  reportProgress,
+  throwIfCancelled,
 } from '../tool.js';
 
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
@@ -224,11 +226,13 @@ export function registerAccountTools(
       }),
       hints: ACTION,
     },
-    async ({ account_ids, wait, timeout_seconds, poll_seconds }) => {
+    async ({ account_ids, wait, timeout_seconds, poll_seconds }, context) => {
+      throwIfCancelled(context);
       const before = await session.read((client) => client.getAccounts());
       const ids = account_ids ?? before.accounts.map((account) => account.id);
       const startedAt = Date.now();
       const progress: Array<{ completed: number; total: number; elapsed_ms: number }> = [];
+      const notifications: Promise<void>[] = [];
 
       let complete = false;
       if (wait) {
@@ -237,19 +241,41 @@ export function registerAccountTools(
             accountIds: ids,
             timeout: timeout_seconds,
             delay: poll_seconds,
-            onProgress: (state) =>
+            onProgress: (state) => {
+              throwIfCancelled(
+                context,
+                'Account refresh polling was cancelled; the institution refresh may continue',
+              );
               progress.push({
                 completed: state.completed,
                 total: state.total,
                 elapsed_ms: state.elapsedMs,
-              }),
+              });
+              notifications.push(
+                reportProgress(
+                  context,
+                  state.completed,
+                  state.total,
+                  `Refreshed ${state.completed} of ${state.total} accounts`,
+                ),
+              );
+            },
           }),
         );
       } else {
         await session.write((client) => client.requestAccountsRefresh(ids));
       }
 
+      await Promise.all(notifications);
+      throwIfCancelled(
+        context,
+        'Account refresh polling was cancelled; the institution refresh may continue',
+      );
       const after = await session.read((client) => client.getAccounts());
+      throwIfCancelled(
+        context,
+        'Account refresh polling was cancelled; the institution refresh may continue',
+      );
       return {
         data: {
           complete: wait ? complete : null,

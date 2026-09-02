@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 
-import type { McpServer } from '@modelcontextprotocol/server';
+import type { McpServer, ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import type { Account } from '@hakimelek/monarchmoney';
@@ -10,7 +10,14 @@ import type { AccountValues, ChangeGuard, ChangeStore, UndoStep } from '../chang
 import { mapConcurrent } from '../concurrency.js';
 import { ruleInputFromApi } from '../rule-state.js';
 import type { MonarchAccess, MonarchClient } from '../session.js';
-import { READ_ONLY, UPDATE, addTool } from '../tool.js';
+import {
+  READ_ONLY,
+  UPDATE,
+  addTool,
+  reportProgress,
+  requestCancelled,
+  throwIfCancelled,
+} from '../tool.js';
 import {
   recurringMatches,
   transactionSplitValues,
@@ -70,13 +77,26 @@ function independentTransactionUndo(step: UndoStep): boolean {
   return step.operation === 'update_transaction' || step.operation === 'restore_transaction';
 }
 
-async function undoAll(client: MonarchClient, steps: UndoStep[]): Promise<void> {
+async function undoAll(
+  client: MonarchClient,
+  steps: UndoStep[],
+  context: ServerContext,
+): Promise<void> {
   const pending = [...steps].reverse();
+  let completed = 0;
   while (pending.length) {
+    throwIfCancelled(context, `Undo cancelled after ${completed} of ${steps.length} steps`);
     const next = pending.shift();
     if (!next) break;
     if (!independentTransactionUndo(next)) {
       await undo(client, next);
+      completed += 1;
+      await reportProgress(
+        context,
+        completed,
+        steps.length,
+        `Restored ${completed} of ${steps.length}`,
+      );
       continue;
     }
     const batch: UndoStep[] = [next];
@@ -84,7 +104,17 @@ async function undoAll(client: MonarchClient, steps: UndoStep[]): Promise<void> 
       const candidate = pending.shift();
       if (candidate) batch.push(candidate);
     }
-    await mapConcurrent(batch, 4, (step) => undo(client, step));
+    await mapConcurrent(batch, 4, async (step) => {
+      throwIfCancelled(context, `Undo cancelled after ${completed} of ${steps.length} steps`);
+      await undo(client, step);
+      completed += 1;
+      await reportProgress(
+        context,
+        completed,
+        steps.length,
+        `Restored ${completed} of ${steps.length}`,
+      );
+    });
   }
 }
 
@@ -270,7 +300,8 @@ export function registerChangeTools(
       }),
       hints: UPDATE,
     },
-    async ({ change_id, force }) => {
+    async ({ change_id, force }, context) => {
+      throwIfCancelled(context);
       const change = changes.get(change_id);
       if (!change) throw new Error(`Change ${change_id} was not found`);
       if (
@@ -293,8 +324,10 @@ export function registerChangeTools(
       }
       try {
         await session.write(async (client) => {
+          throwIfCancelled(context);
           if (!force && change.guards?.length) {
             const conflicts = await conflictingGuards(client, change.guards);
+            throwIfCancelled(context);
             if (conflicts.length) {
               throw new Error(
                 `Change ${change_id} conflicts with newer Monarch state for ${conflicts.join(', ')}; inspect it or retry with force=true`,
@@ -302,7 +335,7 @@ export function registerChangeTools(
             }
           }
           changes.markUndoing(change_id);
-          await undoAll(client, change.undo);
+          await undoAll(client, change.undo, context);
         });
         changes.markUndone(change_id);
       } catch (error) {
@@ -318,6 +351,7 @@ export function registerChangeTools(
       return {
         data: { change_id, status: 'undone', affected_count: change.affected_count },
         summary: `Undid change ${change_id} across ${change.affected_count} records.`,
+        cancelled: requestCancelled(context),
         change: {
           id: change_id,
           affectedCount: change.affected_count,
