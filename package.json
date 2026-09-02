@@ -1,0 +1,43 @@
+{
+  "name": "@frapbod/monarch-mcp",
+  "version": "0.1.0",
+  "description": "Fast, agent-friendly MCP server for Monarch Money",
+  "type": "module",
+  "bin": {
+    "monarch-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "test:race": "node --import tsx --test --test-concurrency=8 test/**/*.test.ts",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "start": "node dist/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/frapbod/monarch-mcp.git"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@hakimelek/monarchmoney": "0.3.1",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.11",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "22.20.1",
+    "tsx": "4.20.6",
+    "typescript": "7.0.2"
+  }
+}
