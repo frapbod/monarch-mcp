@@ -15,7 +15,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test 'test/**/*.test.ts'",
+    "test:live": "MONARCH_LIVE_TEST=1 node --import tsx --test 'test/live/**/*.test.ts'",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",
@@ -28,7 +29,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@hakimelek/monarchmoney": "0.3.1",
+    "@hakimelek/monarchmoney": "https://github.com/rtainaan/monarchmoney-node/releases/download/v0.3.1-rtainaan.2/hakimelek-monarchmoney-0.3.1-rtainaan.2.tgz",
     "@modelcontextprotocol/server": "2.0.0",
     "zod": "4.5.4"
   },

@@ -1,6 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
+import { classifyError, emitToolEvent } from './events.js';
+
 export const detailSchema = z
   .enum(['compact', 'full'])
   .default('compact')
@@ -61,6 +63,13 @@ export const READ_ONLY: ToolHints = {
 
 export const UPDATE: ToolHints = {
   readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
+export const ACTION: ToolHints = {
+  readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: true,
   openWorldHint: true,
@@ -103,6 +112,7 @@ export function addTool<Shape extends z.ZodRawShape>(
       annotations: spec.hints,
     },
     async (args) => {
+      const startedAt = performance.now();
       try {
         const result = await handler(args);
         const output = {
@@ -113,7 +123,7 @@ export function addTool<Shape extends z.ZodRawShape>(
             ...(result.page ? { page: result.page } : {}),
           },
         };
-        return {
+        const response = {
           content: [
             {
               type: 'text' as const,
@@ -122,7 +132,25 @@ export function addTool<Shape extends z.ZodRawShape>(
           ],
           structuredContent: output,
         };
+        emitToolEvent({
+          tool: spec.name,
+          outcome: 'success',
+          durationMs: performance.now() - startedAt,
+          readOnly: spec.hints.readOnlyHint,
+          destructive: spec.hints.destructiveHint,
+          idempotent: spec.hints.idempotentHint,
+        });
+        return response;
       } catch (error) {
+        emitToolEvent({
+          tool: spec.name,
+          outcome: 'error',
+          durationMs: performance.now() - startedAt,
+          readOnly: spec.hints.readOnlyHint,
+          destructive: spec.hints.destructiveHint,
+          idempotent: spec.hints.idempotentHint,
+          errorKind: classifyError(error),
+        });
         const message = error instanceof Error ? error.message : String(error);
         return {
           content: [{ type: 'text' as const, text: `Monarch request failed: ${message}` }],

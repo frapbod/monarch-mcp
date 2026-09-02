@@ -1,7 +1,8 @@
 # Monarch MCP
 
-A small TypeScript MCP server for Monarch Money, backed by
-`@hakimelek/monarchmoney`.
+A small TypeScript MCP server for Monarch Money. Its TypeScript Monarch client
+is pinned to a tested fork so upstream GraphQL changes can be fixed and verified
+without waiting for an npm release.
 
 The server uses the stable MCP TypeScript SDK v2 and serves both the modern
 `2026-07-28` protocol and older MCP clients over stdio. Every successful call
@@ -25,6 +26,7 @@ node dist/server.js
 
 - `MONARCH_SESSION_DIR` — token-cache directory; defaults to `~/.monarch-mcp`
 - `MONARCH_TIMEOUT_SECONDS` — upstream request timeout; defaults to `30`
+- `MONARCH_MCP_EVENT_LOG` — optional JSONL path for privacy-safe tool outcome and latency events
 
 The image is built with `make image`; its stdio entrypoint is the server.
 
@@ -55,7 +57,7 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `get_transaction_tags`
 - `create_transaction`, `update_transaction`, `delete_transaction`
 - `set_transaction_splits`, `set_transaction_tags`
-- `create_transaction_tag`
+- `create_transaction_tag`, `delete_transaction_tag`
 - `create_transaction_category`, `delete_transaction_category`
 
 ### Planning
@@ -80,9 +82,10 @@ useful.
 make check
 ```
 
-The check runs formatting, lint, strict type checking, behavior tests, and a
-production build. Live Monarch integration checks run separately because CI
-has no account credentials.
+The check runs formatting, lint, strict type checking, exact handler-contract
+tests for every tool, and a production build. A separate self-cleaning live
+suite validates the same surface against Monarch because CI has no account
+credentials.
 
 ## Status
 
