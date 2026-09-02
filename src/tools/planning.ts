@@ -5,7 +5,7 @@ import { budgetAmount } from '../budget-state.js';
 import { activatePrepared, type ChangeStore, journalMutation } from '../changes.js';
 import type { MonarchAccess } from '../session.js';
 import { READ_ONLY, UPDATE, addTool, assertDateRange, dateSchema, invalidInput } from '../tool.js';
-import { recurringMatches } from '../transaction-state.js';
+import { recurringMatches, recurringValues } from '../transaction-state.js';
 
 const rangeSchema = z.object({
   start_date: dateSchema.optional(),
@@ -95,7 +95,7 @@ export function registerPlanningTools(
         amount,
         ...(category_id ? { categoryId: category_id } : {}),
         ...(category_group_id ? { categoryGroupId: category_group_id } : {}),
-        ...(start_date ? { startDate: start_date } : {}),
+        startDate: effectiveStart,
         applyToFuture: apply_to_future,
       };
       const { value: data, change } = await journalMutation(
@@ -124,6 +124,13 @@ export function registerPlanningTools(
                 },
               ]
             : [],
+          ...(reversible
+            ? {
+                redo: [
+                  { operation: 'set_budget_amount', values: { ...request, applyToFuture: false } },
+                ],
+              }
+            : {}),
           snapshot: { previous_amount: previousAmount, start_date: effectiveStart },
         },
         () => session.write((client) => client.setBudgetAmount(request)),
@@ -236,35 +243,10 @@ export function registerPlanningTools(
     },
     async ({ transaction_id, is_recurring, frequency, base_date, amount, is_active }) => {
       const details = await session.read((client) => client.getTransactionDetails(transaction_id));
-      const transaction = details.transaction as Record<string, unknown> | undefined;
-      const merchant = transaction?.merchant as
-        | {
-            id?: string;
-            name?: string;
-            recurringTransactionStream?: {
-              frequency?: string;
-              baseDate?: string;
-              amount?: number;
-              isActive?: boolean;
-            } | null;
-          }
-        | undefined;
-      if (!merchant?.id || !merchant.name) {
-        throw new Error(`Transaction ${transaction_id} has no merchant to update`);
-      }
-      const previous = merchant.recurringTransactionStream;
-      const undo = {
-        merchantId: merchant.id,
-        name: merchant.name,
-        isRecurring: previous !== null && previous !== undefined,
-        ...(previous?.frequency ? { frequency: previous.frequency } : {}),
-        ...(previous?.baseDate ? { baseDate: previous.baseDate } : {}),
-        ...(previous?.amount !== undefined ? { amount: previous.amount } : {}),
-        ...(previous?.isActive !== undefined ? { isActive: previous.isActive } : {}),
-      };
+      const previous = recurringValues(details);
       const requested = {
-        merchantId: merchant.id,
-        name: merchant.name,
+        merchantId: previous.merchantId,
+        name: previous.name,
         isRecurring: is_recurring,
         ...(frequency ? { frequency } : {}),
         ...(base_date ? { baseDate: base_date } : {}),
@@ -275,7 +257,20 @@ export function registerPlanningTools(
         tool: 'update_recurring_merchant',
         affected_count: 1,
         reversible: true,
-        undo: [{ operation: 'update_recurring_merchant', values: undo }],
+        undo: [
+          {
+            operation: 'update_recurring_merchant',
+            transactionId: transaction_id,
+            values: previous,
+          },
+        ],
+        redo: [
+          {
+            operation: 'update_recurring_merchant',
+            transactionId: transaction_id,
+            values: requested,
+          },
+        ],
       });
       let result: unknown;
       let writeError: unknown;
@@ -285,17 +280,22 @@ export function registerPlanningTools(
         writeError = error;
       }
       let verified = false;
+      let guard: { kind: 'recurring'; transactionId: string; values: typeof requested } | undefined;
       try {
         const after = await session.read((client) => client.getTransactionDetails(transaction_id));
         verified = recurringMatches(after, requested);
+        guard = {
+          kind: 'recurring',
+          transactionId: transaction_id,
+          values: recurringValues(after),
+        };
       } catch {
         // The prior schedule is journaled even when the readback is unavailable.
       }
-      const change = activatePrepared(changes, prepared.id, {
-        guards: verified
-          ? [{ kind: 'recurring', transactionId: transaction_id, values: requested }]
-          : [],
+      const active = activatePrepared(changes, prepared.id, {
+        guards: guard ? [guard] : [],
       });
+      const change = verified ? active : changes.markUncertain(active.id);
       return {
         data: {
           result,
@@ -306,8 +306,9 @@ export function registerPlanningTools(
             : {}),
         },
         summary: verified
-          ? `Updated and verified the recurring schedule for ${merchant.name}; undo with ${change.id}.`
+          ? `Updated and verified the recurring schedule for ${previous.name}; undo with ${change.id}.`
           : `The recurring update could not be verified; restore the prior schedule with ${change.id}.`,
+        ambiguous: !verified,
         change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },

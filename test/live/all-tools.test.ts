@@ -98,7 +98,7 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     await sweep(client);
 
     const listed = await client.listTools();
-    assert.equal(listed.tools.length, 46);
+    assert.equal(listed.tools.length, 47);
 
     const accounts = (await call(client, 'get_accounts', { detail: 'full' })).accounts as Data[];
     assert.ok(accounts.length > 0, 'get_accounts returned no accounts');
@@ -307,6 +307,13 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     ).transaction;
     assert.equal(restoredTransaction.merchant?.name, merchantName);
     assert.equal(restoredTransaction.amount, 1);
+    await call(client, 'redo_change', { change_id: transactionUpdate.change_id });
+    const redoneTransaction = (
+      await call(client, 'get_transaction', { transaction_id: transactionId })
+    ).transaction;
+    assert.equal(redoneTransaction.merchant?.name, `${merchantName}-Updated`);
+    assert.equal(redoneTransaction.amount, 2);
+    await call(client, 'undo_change', { change_id: transactionUpdate.change_id });
 
     const bulkUpdate = await call(client, 'bulk_update_transactions', {
       updates: [

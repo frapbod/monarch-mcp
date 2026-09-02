@@ -9,6 +9,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 
 import { AuthenticationError, InputValidationError, RequestCancelledError } from '../src/errors.js';
 import { classifyError } from '../src/events.js';
+import { FileChangeStore } from '../src/changes.js';
 import { createServer } from '../src/server.js';
 import type { MonarchAccess, MonarchClient } from '../src/session.js';
 
@@ -108,6 +109,62 @@ test('tool events record outcomes and latency without arguments, results, or raw
     );
     assert.ok(events.every((event) => event.duration_ms >= 0));
   } finally {
+    if (previous === undefined) delete process.env.MONARCH_MCP_EVENT_LOG;
+    else process.env.MONARCH_MCP_EVENT_LOG = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an unverified mutation is measured as ambiguous rather than successful', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-ambiguous-events-'));
+  const path = join(directory, 'events.jsonl');
+  const previous = process.env.MONARCH_MCP_EVENT_LOG;
+  process.env.MONARCH_MCP_EVENT_LOG = path;
+  let reads = 0;
+  const monarch = {
+    getTransactionDetails: async () => {
+      reads += 1;
+      if (reads > 1) throw new Error('sentinel readback failure');
+      return {
+        transaction: {
+          id: 'transaction-1',
+          merchant: { name: 'Old merchant' },
+          category: null,
+          goal: null,
+          tags: [],
+        },
+      };
+    },
+    updateTransaction: async () => {
+      throw new Error('sentinel write response failure');
+    },
+  } as unknown as MonarchClient;
+  const access: MonarchAccess = {
+    read: async (operation) => operation(monarch),
+    write: async (operation) => operation(monarch),
+  };
+  const handler = createMcpHandler(() => createServer(access, new FileChangeStore(directory)));
+  const transport = new StreamableHTTPClientTransport(new URL('http://test.local/mcp'), {
+    fetch: (url, init) => handler.fetch(new Request(url, init)),
+  });
+  const client = new Client({ name: 'ambiguous-event-test', version: '1.0.0' });
+  await client.connect(transport);
+  try {
+    const result = await client.callTool({
+      name: 'update_transaction',
+      arguments: { transaction_id: 'transaction-1', merchant_name: 'New merchant' },
+    });
+    assert.notEqual(result.isError, true);
+    const [event] = readFileSync(path, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.equal(event.outcome, 'ambiguous');
+    assert.equal(event.tool, 'update_transaction');
+    assert.match(event.change_id, /^chg_/);
+  } finally {
+    await client.close();
+    await handler.close();
     if (previous === undefined) delete process.env.MONARCH_MCP_EVENT_LOG;
     else process.env.MONARCH_MCP_EVENT_LOG = previous;
     rmSync(directory, { recursive: true, force: true });

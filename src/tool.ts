@@ -74,6 +74,7 @@ export interface ToolPayload {
   readonly data: unknown;
   readonly summary: string;
   readonly cancelled?: boolean;
+  readonly ambiguous?: boolean;
   readonly page?: PageMetadata;
   readonly change?: {
     readonly id: string;
@@ -169,7 +170,7 @@ export function addTool<Shape extends z.ZodRawShape>(
         };
         emitToolEvent({
           tool: spec.name,
-          outcome: result.cancelled ? 'cancelled' : 'success',
+          outcome: result.cancelled ? 'cancelled' : result.ambiguous ? 'ambiguous' : 'success',
           durationMs: performance.now() - startedAt,
           readOnly: spec.hints.readOnlyHint,
           destructive: spec.hints.destructiveHint,

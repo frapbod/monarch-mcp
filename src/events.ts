@@ -4,7 +4,7 @@ import { AuthenticationError, InputValidationError, RequestCancelledError } from
 
 interface ToolEvent {
   readonly tool: string;
-  readonly outcome: 'success' | 'error' | 'cancelled';
+  readonly outcome: 'success' | 'error' | 'cancelled' | 'ambiguous';
   readonly durationMs: number;
   readonly readOnly: boolean;
   readonly destructive: boolean;

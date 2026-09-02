@@ -71,6 +71,11 @@ export type ChangeGuard =
       readonly lastAppliedAt?: string | null;
     }
   | {
+      readonly kind: 'rule_update';
+      readonly id: string;
+      readonly values: TransactionRuleUpdate;
+    }
+  | {
       readonly kind: 'tag';
       readonly id: string;
       readonly name: string;
@@ -84,7 +89,7 @@ export type ChangeGuard =
     }
   | { readonly kind: 'budget'; readonly values: BudgetValues };
 
-export type UndoStep =
+export type ChangeStep =
   | {
       readonly operation: 'update_transaction';
       readonly id: string;
@@ -110,7 +115,11 @@ export type UndoStep =
       readonly values: TransactionRuleUpdate;
     }
   | { readonly operation: 'create_transaction_rule'; readonly values: TransactionRuleInput }
-  | { readonly operation: 'update_recurring_merchant'; readonly values: RecurringMerchantUpdate }
+  | {
+      readonly operation: 'update_recurring_merchant';
+      readonly transactionId?: string;
+      readonly values: RecurringMerchantUpdate;
+    }
   | { readonly operation: 'delete_account'; readonly id: string }
   | { readonly operation: 'update_account'; readonly id: string; readonly values: AccountValues }
   | { readonly operation: 'delete_transaction'; readonly id: string }
@@ -125,26 +134,39 @@ export interface ChangeRecord {
   readonly affected_count: number;
   readonly reversible: boolean;
   readonly reversibility_reason?: string;
-  readonly undo: UndoStep[];
+  readonly undo: ChangeStep[];
+  readonly redo?: ChangeStep[];
   readonly guards?: ChangeGuard[];
+  readonly redo_guards?: ChangeGuard[];
   readonly snapshot?: unknown;
-  readonly status: 'prepared' | 'active' | 'undoing' | 'uncertain' | 'undone';
+  readonly status: 'prepared' | 'active' | 'undoing' | 'redoing' | 'uncertain' | 'undone';
   readonly activated_at?: string;
   readonly undo_started_at?: string;
+  readonly redo_started_at?: string;
   readonly uncertain_at?: string;
   readonly undone_at?: string;
+  readonly redone_at?: string;
 }
 
 export type ChangeInput = Omit<
   ChangeRecord,
-  'id' | 'created_at' | 'status' | 'activated_at' | 'undo_started_at' | 'uncertain_at' | 'undone_at'
+  | 'id'
+  | 'created_at'
+  | 'status'
+  | 'activated_at'
+  | 'undo_started_at'
+  | 'redo_started_at'
+  | 'uncertain_at'
+  | 'undone_at'
+  | 'redone_at'
 >;
 
 export interface ChangeCompletion {
   readonly affected_count?: number;
   readonly reversible?: boolean;
   readonly reversibility_reason?: string | null;
-  readonly undo?: UndoStep[];
+  readonly undo?: ChangeStep[];
+  readonly redo?: ChangeStep[];
   readonly guards?: ChangeGuard[];
   readonly snapshot?: unknown;
 }
@@ -154,10 +176,12 @@ export interface ChangeStore {
   activate(id: string, completion?: ChangeCompletion): ChangeRecord;
   markUncertain(id: string): ChangeRecord;
   markUndoing(id: string): ChangeRecord;
+  markRedoing(id: string): ChangeRecord;
   record(input: ChangeInput): ChangeRecord;
   get(id: string): ChangeRecord | undefined;
   list(limit: number): ChangeRecord[];
-  markUndone(id: string): ChangeRecord;
+  markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord;
+  markRedone(id: string, guards?: ChangeGuard[]): ChangeRecord;
 }
 
 export async function journalMutation<T>(
@@ -274,7 +298,18 @@ export class FileChangeStore implements ChangeStore {
     const updated: ChangeRecord = {
       ...current,
       status: 'undoing',
-      undo_started_at: current.undo_started_at ?? new Date().toISOString(),
+      undo_started_at: new Date().toISOString(),
+    };
+    this.write(updated);
+    return updated;
+  }
+
+  markRedoing(id: string): ChangeRecord {
+    const current = this.required(id);
+    const updated: ChangeRecord = {
+      ...current,
+      status: 'redoing',
+      redo_started_at: new Date().toISOString(),
     };
     this.write(updated);
     return updated;
@@ -310,12 +345,25 @@ export class FileChangeStore implements ChangeStore {
       .slice(0, limit);
   }
 
-  markUndone(id: string): ChangeRecord {
+  markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord {
     const current = this.required(id);
     const updated: ChangeRecord = {
       ...current,
+      ...(redoGuards ? { redo_guards: redoGuards } : {}),
       status: 'undone',
-      undone_at: current.undone_at ?? new Date().toISOString(),
+      undone_at: new Date().toISOString(),
+    };
+    this.write(updated);
+    return updated;
+  }
+
+  markRedone(id: string, guards?: ChangeGuard[]): ChangeRecord {
+    const current = this.required(id);
+    const updated: ChangeRecord = {
+      ...current,
+      ...(guards ? { guards } : {}),
+      status: 'active',
+      redone_at: new Date().toISOString(),
     };
     this.write(updated);
     return updated;
