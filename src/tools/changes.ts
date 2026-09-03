@@ -6,12 +6,14 @@ import * as z from 'zod/v4';
 import type { Account } from '@hakimelek/monarchmoney';
 
 import { budgetAmount } from '../budget-state.js';
-import type {
-  AccountValues,
-  ChangeStep,
-  ChangeGuard,
-  ChangeRecord,
-  ChangeStore,
+import {
+  type AccountValues,
+  type ChangeStep,
+  type ChangeGuard,
+  type ChangeRecord,
+  type ChangeStore,
+  selectedValuesMatch,
+  tryMarkUncertain,
 } from '../changes.js';
 import { mapConcurrent } from '../concurrency.js';
 import { RequestCancelledError } from '../errors.js';
@@ -88,21 +90,23 @@ async function applySteps(
   client: MonarchClient,
   steps: ChangeStep[],
   context: ServerContext,
-  reverse: boolean,
-  verb: 'Restored' | 'Reapplied',
+  direction: 'undo' | 'redo',
 ): Promise<void> {
-  const pending = reverse ? [...steps].reverse() : [...steps];
-  const action = verb === 'Restored' ? 'Undo' : 'Redo';
+  const pending = direction === 'undo' ? [...steps].reverse() : steps;
+  const action = direction === 'undo' ? 'Undo' : 'Redo';
+  const verb = direction === 'undo' ? 'Restored' : 'Reapplied';
   let completed = 0;
-  while (pending.length) {
+  let nextIndex = 0;
+  while (nextIndex < pending.length) {
     if (requestCancelled(context)) {
       throw new RequestCancelledError(
         `${action} cancelled after ${completed} of ${steps.length} steps`,
         completed,
       );
     }
-    const next = pending.shift();
+    const next = pending[nextIndex];
     if (!next) break;
+    nextIndex += 1;
     if (!independentTransactionStep(next)) {
       await applyStep(client, next);
       completed += 1;
@@ -115,9 +119,11 @@ async function applySteps(
       continue;
     }
     const batch: ChangeStep[] = [next];
-    while (pending[0] && independentTransactionStep(pending[0])) {
-      const candidate = pending.shift();
-      if (candidate) batch.push(candidate);
+    while (true) {
+      const candidate = pending[nextIndex];
+      if (!candidate || !independentTransactionStep(candidate)) break;
+      batch.push(candidate);
+      nextIndex += 1;
     }
     try {
       await mapConcurrent(batch, 4, async (step) => {
@@ -189,13 +195,6 @@ function guardsForSteps(steps: ChangeStep[]): ChangeGuard[] | undefined {
     }
   }
   return guards;
-}
-
-function selectedValuesMatch<Values extends object>(
-  actual: Values,
-  expected: Partial<Values>,
-): boolean {
-  return Object.entries(expected).every(([key, value]) => actual[key as keyof Values] === value);
 }
 
 function accountValues(account: Account): AccountValues {
@@ -372,13 +371,7 @@ async function applyRecovery(
 
       if (direction === 'undo') changes.markUndoing(change.id);
       else changes.markRedoing(change.id);
-      await applySteps(
-        client,
-        steps,
-        context,
-        direction === 'undo',
-        direction === 'undo' ? 'Restored' : 'Reapplied',
-      );
+      await applySteps(client, steps, context, direction);
 
       const finalGuards = guardsForSteps(steps);
       if (finalGuards?.length) {
@@ -399,11 +392,7 @@ async function applyRecovery(
   } catch (error) {
     const status = changes.get(change.id)?.status;
     if (status === 'undoing' || status === 'redoing') {
-      try {
-        changes.markUncertain(change.id);
-      } catch {
-        // The transition record still identifies the interrupted recovery attempt.
-      }
+      tryMarkUncertain(changes, change.id);
     }
     if (error instanceof RequestCancelledError && error.completedCount > 0) {
       throw new RequestCancelledError(error.message, error.completedCount, {

@@ -392,7 +392,7 @@ test('cancelling an active undo stops new writes and marks partial work uncertai
   } as unknown as MonarchClient;
   try {
     await withClient(client, async (mcp, changes) => {
-      const change = changes.record({
+      const prepared = changes.prepare({
         tool: 'bulk_update_transactions',
         affected_count: 8,
         reversible: true,
@@ -402,6 +402,7 @@ test('cancelling an active undo stops new writes and marks partial work uncertai
           values: { merchantName: 'Old merchant' },
         })),
       });
+      const change = changes.activate(prepared.id);
       const abort = new AbortController();
       const request = mcp.callTool(
         { name: 'undo_change', arguments: { change_id: change.id, force: true } },

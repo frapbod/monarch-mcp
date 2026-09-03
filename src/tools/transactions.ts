@@ -8,6 +8,9 @@ import {
   type TransactionGuard,
   type TransactionValues,
   journalMutation,
+  observeMutationOutcome,
+  selectedValues,
+  selectedValuesMatch,
 } from '../changes.js';
 import { mapConcurrent } from '../concurrency.js';
 import { compactTransaction } from '../projections.js';
@@ -87,20 +90,22 @@ function clientUpdate(update: TransactionUpdate): TransactionValues {
   };
 }
 
-function updateMatches(data: Record<string, unknown>, expected: TransactionValues): boolean {
-  const actual = transactionValues(data);
-  return Object.entries(expected).every(
-    ([key, value]) => actual[key as keyof TransactionValues] === value,
+function observeTransactionUpdate(session: MonarchAccess, id: string, expected: TransactionValues) {
+  return observeMutationOutcome(
+    () => session.write((client) => client.updateTransaction(id, expected)),
+    async () => {
+      const after = await session.read((client) => client.getTransactionDetails(id));
+      const actual = transactionValues(after);
+      return {
+        verified: selectedValuesMatch(actual, expected),
+        guard: {
+          kind: 'transaction' as const,
+          id,
+          values: selectedValues(actual, expected),
+        },
+      };
+    },
   );
-}
-
-function selectedTransactionValues(
-  actual: TransactionValues,
-  selected: TransactionValues,
-): TransactionValues {
-  return Object.fromEntries(
-    Object.keys(selected).map((key) => [key, actual[key as keyof TransactionValues]]),
-  ) as TransactionValues;
 }
 
 export function registerTransactionTools(
@@ -391,7 +396,7 @@ export function registerTransactionTools(
       }
       const before = await session.read((client) => client.getTransactionDetails(transaction_id));
       const expected = clientUpdate(updates);
-      const previous = selectedTransactionValues(transactionValues(before), expected);
+      const previous = selectedValues(transactionValues(before), expected);
       const prepared = changes.prepare({
         tool: 'update_transaction',
         affected_count: 1,
@@ -399,38 +404,21 @@ export function registerTransactionTools(
         undo: [{ operation: 'update_transaction', id: transaction_id, values: previous }],
         redo: [{ operation: 'update_transaction', id: transaction_id, values: expected }],
       });
-      let data: unknown;
-      let writeError: unknown;
-      try {
-        data = await session.write((client) => client.updateTransaction(transaction_id, expected));
-      } catch (error) {
-        writeError = error;
-      }
-      let verified = false;
-      let guard: TransactionGuard | undefined;
-      try {
-        const after = await session.read((client) => client.getTransactionDetails(transaction_id));
-        verified = updateMatches(after, expected);
-        guard = {
-          kind: 'transaction',
-          id: transaction_id,
-          values: selectedTransactionValues(transactionValues(after), expected),
-        };
-      } catch {
-        // The inverse is still recorded because the write may have reached Monarch.
-      }
+      const { result, writeError, verified, guard } = await observeTransactionUpdate(
+        session,
+        transaction_id,
+        expected,
+      );
       const active = activatePrepared(changes, prepared.id, {
         guards: guard ? [guard] : [],
       });
       const change = verified ? active : changes.markUncertain(active.id);
       return {
         data: {
-          result: data,
+          result,
           change_id: change.id,
           status: verified ? 'updated' : 'ambiguous',
-          ...(writeError
-            ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
-            : {}),
+          ...(writeError !== undefined ? { error: writeError } : {}),
         },
         summary: verified
           ? `Updated transaction ${transaction_id}; undo with ${change.id}.`
@@ -492,10 +480,7 @@ export function registerTransactionTools(
                 undo: {
                   operation: 'update_transaction' as const,
                   id: transaction_id,
-                  values: selectedTransactionValues(
-                    transactionValues(before),
-                    clientUpdate(fields),
-                  ),
+                  values: selectedValues(transactionValues(before), clientUpdate(fields)),
                 },
               };
             } catch (error) {
@@ -547,34 +532,16 @@ export function registerTransactionTools(
           };
         } else {
           const { transaction_id, expected } = plan;
-          let writeError: unknown;
-          try {
-            await session.write((client) => client.updateTransaction(transaction_id, expected));
-          } catch (error) {
-            writeError = error;
-          }
-          let verified = false;
-          let guard: TransactionGuard | undefined;
-          try {
-            const after = await session.read((client) =>
-              client.getTransactionDetails(transaction_id),
-            );
-            verified = updateMatches(after, expected);
-            guard = {
-              kind: 'transaction',
-              id: transaction_id,
-              values: selectedTransactionValues(transactionValues(after), expected),
-            };
-          } catch {
-            // Preserve the inverse for an outcome that cannot be read back.
-          }
+          const { writeError, verified, guard } = await observeTransactionUpdate(
+            session,
+            transaction_id,
+            expected,
+          );
           outcome = {
             result: {
               transaction_id,
               status: verified ? ('updated' as const) : ('ambiguous' as const),
-              ...(writeError
-                ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
-                : {}),
+              ...(writeError !== undefined ? { error: writeError } : {}),
             },
             ...(guard ? { guard } : {}),
             undo: plan.undo,

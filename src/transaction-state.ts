@@ -2,7 +2,7 @@ import type { RecurringMerchantUpdate } from '@hakimelek/monarchmoney';
 
 import type { ChangeStep, TransactionGuard, TransactionValues } from './changes.js';
 
-export function transactionFromDetails(data: Record<string, unknown>): Record<string, unknown> {
+function transactionFromDetails(data: Record<string, unknown>): Record<string, unknown> {
   const transaction = data.transaction;
   if (!transaction || typeof transaction !== 'object') {
     throw new Error('Monarch returned no transaction details');
