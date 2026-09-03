@@ -6,6 +6,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const PREFIX = 'MCP-Test-';
 const NORMALIZED_PREFIX = PREFIX.toLocaleLowerCase();
+const CALLED_TOOLS = new Set<string>();
 
 // biome-ignore lint/suspicious/noExplicitAny: Monarch's unsupported API has no stable response schema.
 type Data = Record<string, any>;
@@ -24,6 +25,7 @@ function data(
 }
 
 async function call(client: Client, tool: string, args: Data = {}): Promise<Data> {
+  CALLED_TOOLS.add(tool);
   return data(await client.callTool({ name: tool, arguments: args }, { timeout: 360_000 }), tool);
 }
 
@@ -99,6 +101,7 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
 
   try {
     await sweep(client);
+    CALLED_TOOLS.clear();
 
     const listed = await client.listTools();
     assert.equal(listed.tools.length, 47);
@@ -210,7 +213,8 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
     });
     assert.equal(updatedRule.rule?.setMerchantAction?.name, `${ruleMatch}-Renamed`);
     await call(client, 'undo_change', { change_id: updatedRule.change_id });
-    await call(client, 'undo_change', { change_id: createdRule.change_id });
+    const deletedRule = await call(client, 'delete_transaction_rule', { rule_id: ruleId });
+    assert.equal(deletedRule.deleted, true);
     assert.ok(
       !((await call(client, 'get_transaction_rules')).transactionRules as Data[]).some(
         (rule) => rule.id === ruleId,
@@ -415,6 +419,11 @@ live('every tool passes a self-cleaning live lifecycle', { timeout: 600_000 }, a
         })
       ).complete,
       'boolean',
+    );
+    assert.deepEqual(
+      [...CALLED_TOOLS].sort(),
+      listed.tools.map((tool) => tool.name).sort(),
+      'the live lifecycle did not invoke every advertised tool',
     );
   } finally {
     try {
