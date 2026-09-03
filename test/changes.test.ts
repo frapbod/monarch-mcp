@@ -128,14 +128,15 @@ test('records inverse operations atomically and lists newest changes first', asy
   const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-store-'));
   const changes = new FileChangeStore(directory);
   try {
-    const first = changes.record({
+    const firstPrepared = changes.prepare({
       tool: 'update_transaction',
       affected_count: 1,
       reversible: true,
       undo: [{ operation: 'update_transaction', id: 'transaction-1', values: { amount: 1 } }],
     });
+    const first = changes.activate(firstPrepared.id);
     await new Promise((resolve) => setTimeout(resolve, 2));
-    const second = changes.record({
+    const secondPrepared = changes.prepare({
       tool: 'update_recurring_merchant',
       affected_count: 1,
       reversible: true,
@@ -146,6 +147,7 @@ test('records inverse operations atomically and lists newest changes first', asy
         },
       ],
     });
+    const second = changes.activate(secondPrepared.id);
     assert.deepEqual(
       changes.list(2).map(({ id }) => id),
       [second.id, first.id],

@@ -1,7 +1,12 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
-import { type AccountValues, type ChangeStore, journalMutation } from '../changes.js';
+import {
+  type AccountValues,
+  type ChangeStore,
+  journalMutation,
+  selectedValues,
+} from '../changes.js';
 import { compactAccount } from '../projections.js';
 import type { MonarchAccess } from '../session.js';
 import {
@@ -19,12 +24,6 @@ import {
 } from '../tool.js';
 
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
-
-function selectedAccountValues(actual: AccountValues, selected: AccountValues): AccountValues {
-  return Object.fromEntries(
-    Object.keys(selected).map((key) => [key, actual[key as keyof AccountValues]]),
-  ) as AccountValues;
-}
 
 export function registerAccountTools(
   server: McpServer,
@@ -417,7 +416,7 @@ export function registerAccountTools(
           ? { hideTransactionsFromReports: updates.hide_transactions_from_reports }
           : {}),
       };
-      const previous = selectedAccountValues(current, requested);
+      const previous = selectedValues(current, requested);
       const { value: data, change } = await journalMutation(
         changes,
         {

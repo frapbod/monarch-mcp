@@ -70,7 +70,7 @@ interface PageMetadata {
   readonly next_offset: number | null;
 }
 
-export interface ToolPayload {
+interface ToolPayload {
   readonly data: unknown;
   readonly summary: string;
   readonly cancelled?: boolean;
@@ -83,7 +83,7 @@ export interface ToolPayload {
   };
 }
 
-export interface ToolHints {
+interface ToolHints {
   readonly readOnlyHint: boolean;
   readonly destructiveHint: boolean;
   readonly idempotentHint: boolean;

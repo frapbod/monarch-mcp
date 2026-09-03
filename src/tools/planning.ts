@@ -2,7 +2,12 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import { budgetAmount } from '../budget-state.js';
-import { activatePrepared, type ChangeStore, journalMutation } from '../changes.js';
+import {
+  activatePrepared,
+  type ChangeStore,
+  journalMutation,
+  observeMutationOutcome,
+} from '../changes.js';
 import type { MonarchAccess } from '../session.js';
 import { READ_ONLY, UPDATE, addTool, assertDateRange, dateSchema, invalidInput } from '../tool.js';
 import { recurringMatches, recurringValues } from '../transaction-state.js';
@@ -272,26 +277,22 @@ export function registerPlanningTools(
           },
         ],
       });
-      let result: unknown;
-      let writeError: unknown;
-      try {
-        result = await session.write((client) => client.updateRecurringMerchant(requested));
-      } catch (error) {
-        writeError = error;
-      }
-      let verified = false;
-      let guard: { kind: 'recurring'; transactionId: string; values: typeof requested } | undefined;
-      try {
-        const after = await session.read((client) => client.getTransactionDetails(transaction_id));
-        verified = recurringMatches(after, requested);
-        guard = {
-          kind: 'recurring',
-          transactionId: transaction_id,
-          values: recurringValues(after),
-        };
-      } catch {
-        // The prior schedule is journaled even when the readback is unavailable.
-      }
+      const { result, writeError, verified, guard } = await observeMutationOutcome(
+        () => session.write((client) => client.updateRecurringMerchant(requested)),
+        async () => {
+          const after = await session.read((client) =>
+            client.getTransactionDetails(transaction_id),
+          );
+          return {
+            verified: recurringMatches(after, requested),
+            guard: {
+              kind: 'recurring' as const,
+              transactionId: transaction_id,
+              values: recurringValues(after),
+            },
+          };
+        },
+      );
       const active = activatePrepared(changes, prepared.id, {
         guards: guard ? [guard] : [],
       });
@@ -301,9 +302,7 @@ export function registerPlanningTools(
           result,
           change_id: change.id,
           status: verified ? 'updated' : 'ambiguous',
-          ...(writeError
-            ? { error: writeError instanceof Error ? writeError.message : String(writeError) }
-            : {}),
+          ...(writeError !== undefined ? { error: writeError } : {}),
         },
         summary: verified
           ? `Updated and verified the recurring schedule for ${previous.name}; undo with ${change.id}.`

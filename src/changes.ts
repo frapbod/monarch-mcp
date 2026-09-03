@@ -39,7 +39,7 @@ export interface AccountValues {
   readonly hideTransactionsFromReports?: boolean;
 }
 
-export interface BudgetValues {
+interface BudgetValues {
   readonly amount: number;
   readonly categoryId?: string;
   readonly categoryGroupId?: string;
@@ -148,7 +148,7 @@ export interface ChangeRecord {
   readonly redone_at?: string;
 }
 
-export type ChangeInput = Omit<
+type ChangeInput = Omit<
   ChangeRecord,
   | 'id'
   | 'created_at'
@@ -161,7 +161,7 @@ export type ChangeInput = Omit<
   | 'redone_at'
 >;
 
-export interface ChangeCompletion {
+interface ChangeCompletion {
   readonly affected_count?: number;
   readonly reversible?: boolean;
   readonly reversibility_reason?: string | null;
@@ -177,7 +177,6 @@ export interface ChangeStore {
   markUncertain(id: string): ChangeRecord;
   markUndoing(id: string): ChangeRecord;
   markRedoing(id: string): ChangeRecord;
-  record(input: ChangeInput): ChangeRecord;
   get(id: string): ChangeRecord | undefined;
   list(limit: number): ChangeRecord[];
   markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord;
@@ -196,11 +195,7 @@ export async function journalMutation<T>(
   try {
     completion = complete(value);
   } catch (error) {
-    try {
-      changes.markUncertain(prepared.id);
-    } catch {
-      // The write-ahead record still identifies the accepted mutation.
-    }
+    tryMarkUncertain(changes, prepared.id);
     throw uncertainMutationError(prepared.id, error);
   }
   return { value, change: activatePrepared(changes, prepared.id, completion) };
@@ -214,11 +209,7 @@ export function activatePrepared(
   try {
     return changes.activate(changeId, completion);
   } catch (error) {
-    try {
-      changes.markUncertain(changeId);
-    } catch {
-      // Preserve the original completion failure and its known change ID.
-    }
+    tryMarkUncertain(changes, changeId);
     throw uncertainMutationError(changeId, error);
   }
 }
@@ -231,12 +222,54 @@ export async function performPrepared<T>(
   try {
     return await mutate();
   } catch (error) {
-    try {
-      changes.markUncertain(changeId);
-    } catch {
-      // The write-ahead record still identifies the attempted mutation.
-    }
+    tryMarkUncertain(changes, changeId);
     throw uncertainMutationError(changeId, error);
+  }
+}
+
+export function tryMarkUncertain(changes: ChangeStore, changeId: string): void {
+  try {
+    changes.markUncertain(changeId);
+  } catch {}
+}
+
+export function selectedValues<Values extends object>(actual: Values, selected: Values): Values {
+  return Object.fromEntries(
+    Object.keys(selected).map((key) => [key, actual[key as keyof Values]]),
+  ) as Values;
+}
+
+export function selectedValuesMatch<Values extends object>(
+  actual: Values,
+  expected: Partial<Values>,
+): boolean {
+  return Object.entries(expected).every(([key, value]) => actual[key as keyof Values] === value);
+}
+
+export async function observeMutationOutcome<Result, Guard>(
+  mutate: () => Promise<Result>,
+  observe: () => Promise<{ verified: boolean; guard: Guard }>,
+) {
+  let result: Result | undefined;
+  let writeError: string | undefined;
+  try {
+    result = await mutate();
+  } catch (error) {
+    writeError = error instanceof Error ? error.message : String(error);
+  }
+  try {
+    return {
+      result,
+      ...(await observe()),
+      ...(writeError !== undefined ? { writeError } : {}),
+    };
+  } catch {
+    return {
+      result,
+      verified: false,
+      guard: undefined,
+      ...(writeError !== undefined ? { writeError } : {}),
+    };
   }
 }
 
@@ -247,7 +280,7 @@ function uncertainMutationError(changeId: string, cause: unknown): Error {
   });
 }
 
-export function defaultChangeDirectory(env: NodeJS.ProcessEnv = process.env): string {
+function defaultChangeDirectory(env: NodeJS.ProcessEnv = process.env): string {
   const sessionDirectory =
     env.MONARCH_SESSION_DIR?.trim() || join(env.HOME?.trim() || homedir(), '.monarch-mcp');
   return env.MONARCH_CHANGE_DIR?.trim() || join(sessionDirectory, 'changes');
@@ -283,40 +316,24 @@ export class FileChangeStore implements ChangeStore {
   }
 
   markUncertain(id: string): ChangeRecord {
-    const current = this.required(id);
-    const updated: ChangeRecord = {
-      ...current,
+    return this.update(id, (current) => ({
       status: 'uncertain',
       uncertain_at: current.uncertain_at ?? new Date().toISOString(),
-    };
-    this.write(updated);
-    return updated;
+    }));
   }
 
   markUndoing(id: string): ChangeRecord {
-    const current = this.required(id);
-    const updated: ChangeRecord = {
-      ...current,
+    return this.update(id, () => ({
       status: 'undoing',
       undo_started_at: new Date().toISOString(),
-    };
-    this.write(updated);
-    return updated;
+    }));
   }
 
   markRedoing(id: string): ChangeRecord {
-    const current = this.required(id);
-    const updated: ChangeRecord = {
-      ...current,
+    return this.update(id, () => ({
       status: 'redoing',
       redo_started_at: new Date().toISOString(),
-    };
-    this.write(updated);
-    return updated;
-  }
-
-  record(input: ChangeInput): ChangeRecord {
-    return this.activate(this.prepare(input).id);
+    }));
   }
 
   get(id: string): ChangeRecord | undefined {
@@ -346,25 +363,27 @@ export class FileChangeStore implements ChangeStore {
   }
 
   markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord {
-    const current = this.required(id);
-    const updated: ChangeRecord = {
-      ...current,
+    return this.update(id, () => ({
       ...(redoGuards ? { redo_guards: redoGuards } : {}),
       status: 'undone',
       undone_at: new Date().toISOString(),
-    };
-    this.write(updated);
-    return updated;
+    }));
   }
 
   markRedone(id: string, guards?: ChangeGuard[]): ChangeRecord {
-    const current = this.required(id);
-    const updated: ChangeRecord = {
-      ...current,
+    return this.update(id, () => ({
       ...(guards ? { guards } : {}),
       status: 'active',
       redone_at: new Date().toISOString(),
-    };
+    }));
+  }
+
+  private update(
+    id: string,
+    values: (current: ChangeRecord) => Partial<ChangeRecord>,
+  ): ChangeRecord {
+    const current = this.required(id);
+    const updated = { ...current, ...values(current) };
     this.write(updated);
     return updated;
   }
