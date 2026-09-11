@@ -36,6 +36,7 @@ const account = {
   displayName: 'Checking',
   currentBalance: 10,
   displayBalance: 10,
+  displayLastUpdatedAt: '2026-09-01T12:00:00Z',
   type: { name: 'depository', display: 'Depository' },
   subtype: { name: 'checking', display: 'Checking' },
   institution: null,
@@ -181,6 +182,52 @@ test('account refresh reports upstream progress', async () => {
     assert.deepEqual(progress, [1, 2]);
   });
 });
+
+for (const complete of [true, false, null]) {
+  test(`refresh completion ${complete} never verifies bank freshness or available cash`, async () => {
+    const client = {
+      getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
+      requestAccountsRefreshAndWait: async () => complete,
+      requestAccountsRefresh: async () => undefined,
+      isAccountsRefreshComplete: async () => complete === true,
+    } as unknown as MonarchClient;
+
+    await withClient(client, async (mcp) => {
+      const result = await mcp.callTool({
+        name: 'refresh_accounts',
+        arguments: { account_ids: ['account-1'], wait: complete !== null },
+      });
+      assert.notEqual(result.isError, true);
+      const { data } = result.structuredContent as {
+        data: {
+          complete: boolean | null;
+          completion_scope: string;
+          balance_context: Record<string, unknown>;
+          accounts: Array<Record<string, unknown>>;
+        };
+      };
+      assert.equal(data.complete, complete);
+      assert.equal(data.completion_scope, 'monarch_sync');
+      assert.equal(data.balance_context.bank_freshness, 'unverified');
+      assert.equal(data.balance_context.available_balance_provided, false);
+      assert.equal(data.balance_context.pending_transactions_included, 'unknown');
+      assert.equal(data.accounts[0]?.current_balance, 10);
+      assert.equal(data.accounts[0]?.monarch_last_updated_at, account.displayLastUpdatedAt);
+      assert.match(JSON.stringify(result.content), /bank available balances.*not verified/);
+
+      const status = await mcp.callTool({
+        name: 'get_refresh_status',
+        arguments: { account_ids: ['account-1'] },
+      });
+      assert.deepEqual((status.structuredContent as { data: unknown }).data, {
+        complete: complete === true,
+        account_ids: ['account-1'],
+        completion_scope: 'monarch_sync',
+        bank_freshness: 'unverified',
+      });
+    });
+  });
+}
 
 test('cancelling refresh polling stops the wait after the in-flight refresh request', async () => {
   let accountReads = 0;

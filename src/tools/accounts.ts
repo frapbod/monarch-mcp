@@ -25,6 +25,16 @@ import {
 
 const accountId = z.string().min(1).describe('Monarch account ID from get_accounts');
 
+const balanceContext = {
+  source: 'monarch',
+  available_balance_provided: false,
+  pending_transactions_included: 'unknown',
+  bank_freshness: 'unverified',
+} as const;
+
+const balanceNotice =
+  'Monarch-reported balances; bank available balances and bank freshness are not verified. Use get_transactions to inspect pending items; do not assume they can be subtracted without double-counting.';
+
 export function registerAccountTools(
   server: McpServer,
   session: MonarchAccess,
@@ -35,8 +45,7 @@ export function registerAccountTools(
     {
       name: 'get_accounts',
       title: 'List Monarch accounts',
-      description:
-        'List bank, credit, investment, loan, and manual accounts. Compact output always includes account IDs, balances, institutions, and freshness.',
+      description: `List bank, credit, investment, loan, and manual accounts. Compact current_balance is Monarch currentBalance, not verified spendable cash. institution_status is institution-wide; monarch_last_updated_at is Monarch metadata. ${balanceNotice}`,
       inputSchema: z.object({ detail: detailSchema }),
       hints: READ_ONLY,
     },
@@ -45,8 +54,12 @@ export function registerAccountTools(
       const accounts =
         detail === 'full' ? response.accounts : response.accounts.map(compactAccount);
       return {
-        data: { accounts, household_preferences: response.householdPreferences },
-        summary: `Found ${accounts.length} Monarch accounts.`,
+        data: {
+          accounts,
+          household_preferences: response.householdPreferences,
+          balance_context: balanceContext,
+        },
+        summary: `Found ${accounts.length} Monarch accounts. ${balanceNotice}`,
       };
     },
   );
@@ -201,7 +214,8 @@ export function registerAccountTools(
     {
       name: 'get_refresh_status',
       title: 'Check account refresh status',
-      description: 'Check whether a prior institution refresh has completed.',
+      description:
+        'Check whether Monarch reports a prior sync complete. Completion does not prove that the bank supplied newer data or that a balance is available to spend.',
       inputSchema: z.object({ account_ids: z.array(accountId).min(1).optional() }),
       hints: READ_ONLY,
     },
@@ -210,8 +224,13 @@ export function registerAccountTools(
         client.isAccountsRefreshComplete(account_ids),
       );
       return {
-        data: { complete, account_ids: account_ids ?? null },
-        summary: complete ? 'Account refresh is complete.' : 'Account refresh is still running.',
+        data: {
+          complete,
+          account_ids: account_ids ?? null,
+          completion_scope: 'monarch_sync',
+          bank_freshness: 'unverified',
+        },
+        summary: `${complete ? 'Monarch reports sync complete.' : 'Monarch sync is still running.'} Bank freshness is not verified.`,
       };
     },
   );
@@ -221,8 +240,7 @@ export function registerAccountTools(
     {
       name: 'refresh_accounts',
       title: 'Refresh linked accounts',
-      description:
-        'Ask linked institutions for current balances and transactions, wait for completion by default, then return fresh account metadata. Omit account_ids to refresh every account.',
+      description: `Request a Monarch sync, wait for completion by default, then re-read Monarch account metadata. complete only reports Monarch sync completion, not newer bank data. Omit account_ids to refresh every account. ${balanceNotice}`,
       inputSchema: z.object({
         account_ids: z.array(accountId).min(1).optional(),
         wait: z.boolean().default(true),
@@ -261,7 +279,7 @@ export function registerAccountTools(
                   context,
                   state.completed,
                   state.total,
-                  `Refreshed ${state.completed} of ${state.total} accounts`,
+                  `Monarch reports sync complete for ${state.completed} of ${state.total} accounts`,
                 ),
               );
             },
@@ -284,6 +302,8 @@ export function registerAccountTools(
       return {
         data: {
           complete: wait ? complete : null,
+          completion_scope: 'monarch_sync',
+          balance_context: balanceContext,
           account_ids: ids,
           elapsed_ms: Date.now() - startedAt,
           progress,
@@ -291,11 +311,13 @@ export function registerAccountTools(
             .filter((account) => ids.includes(account.id))
             .map(compactAccount),
         },
-        summary: wait
-          ? complete
-            ? `Refreshed ${ids.length} accounts and observed completion.`
-            : `Refresh did not complete within ${timeout_seconds} seconds.`
-          : `Started refresh for ${ids.length} accounts.`,
+        summary: `${
+          wait
+            ? complete
+              ? `Monarch reports sync complete for ${ids.length} accounts.`
+              : `Refresh did not complete within ${timeout_seconds} seconds.`
+            : `Started refresh for ${ids.length} accounts.`
+        } ${balanceNotice}`,
       };
     },
   );
