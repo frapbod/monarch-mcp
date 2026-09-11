@@ -36,9 +36,9 @@ The image is built with `make image`; its stdio entrypoint is the server.
 
 ### Accounts and institutions
 
-- `get_accounts` — IDs, balances, types, institutions, connection state, freshness
+- `get_accounts` — IDs, Monarch-reported balances, types, institutions, and sync metadata
 - `get_account_holdings` — investment positions for an account
-- `get_account_history` — complete available balance snapshots for an account
+- `get_account_history` — historical balance snapshots for an account
 - `get_recent_account_balances` — balance arrays across accounts from a date
 - `get_net_worth_history` — aggregate balance history
 - `get_account_snapshots_by_type` — monthly or yearly balances by account type
@@ -49,6 +49,27 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `refresh_accounts` — start a sync and, by default, wait and re-read the accounts
 - `create_manual_account`, `update_account`, `delete_account`
 - `upload_account_balance_history` — import CSV balances for a manual account
+
+Account reads and refresh results include `balance_context`: the source is
+`monarch`, `available_balance_provided` is false, `pending_transactions_included`
+is `unknown`, and `bank_freshness` is `unverified`. The MCP's upstream account query does
+not provide bank available balances. Use the bank's available balance for
+spendable-cash thresholds. `get_transactions` exposes `pending` on each item;
+pending debits can explain a discrepancy, but subtracting them automatically
+could double-count amounts already reflected by a provider.
+
+In 0.5.0, compact account fields are renamed: `balance` → `current_balance`,
+`connection_status` → `institution_status`, and `last_updated_at` →
+`monarch_last_updated_at`. These retain the original upstream values. Institution
+status is institution-wide, not an account connection verdict. `detail=full`
+retains upstream fields with the same `balance_context` alongside the accounts.
+
+`refresh_accounts` and `get_refresh_status` identify `completion_scope` as
+`monarch_sync`. Even `complete: true` does not verify newer bank data: Monarch
+may finish a sync with unchanged balances. Neither Monarch's displayed update
+time nor the MCP's `meta.retrieved_at` proves bank freshness. See Monarch's
+[refresh explanation](https://help.monarch.com/hc/en-us/articles/360054839131-Refreshing-Your-Accounts)
+and [pending-transaction guidance](https://help.monarch.com/hc/en-us/articles/360048393352-Connection-issues).
 
 ### Transactions
 

@@ -232,7 +232,7 @@ test('advertises a complete, accurately annotated tool surface over modern MCP',
   });
 });
 
-test('compact account results retain the account ID and freshness fields', async () => {
+test('compact account results distinguish reported balances and institution metadata', async () => {
   await withClient(async (client) => {
     const result = await client.callTool({
       name: 'get_accounts',
@@ -240,12 +240,36 @@ test('compact account results retain the account ID and freshness fields', async
     });
     assert.equal(result.isError, undefined);
     const output = result.structuredContent as {
-      data: { accounts: Array<Record<string, unknown>> };
+      data: { accounts: Array<Record<string, unknown>>; balance_context: Record<string, unknown> };
     };
-    assert.deepEqual(result.content, [{ type: 'text', text: 'Found 1 Monarch accounts.' }]);
+    assert.match(JSON.stringify(result.content), /Found 1 Monarch accounts/);
+    assert.match(JSON.stringify(result.content), /bank available balances.*not verified/);
     assert.doesNotMatch(JSON.stringify(result.content), /account-123/);
     assert.equal(output.data.accounts[0]?.id, 'account-123');
-    assert.equal(output.data.accounts[0]?.last_updated_at, '2026-09-01T12:00:00Z');
+    assert.equal(output.data.accounts[0]?.current_balance, 2500);
+    assert.equal(output.data.accounts[0]?.institution_status, 'healthy');
+    assert.equal(output.data.accounts[0]?.monarch_last_updated_at, '2026-09-01T12:00:00Z');
+    assert.equal(output.data.accounts[0]?.balance, undefined);
+    assert.equal(output.data.accounts[0]?.connection_status, undefined);
+    assert.equal(output.data.accounts[0]?.last_updated_at, undefined);
+    assert.deepEqual(output.data.balance_context, {
+      source: 'monarch',
+      available_balance_provided: false,
+      pending_transactions_included: 'unknown',
+      bank_freshness: 'unverified',
+    });
+  });
+});
+
+test('full account results preserve upstream fields and still disclose balance limits', async () => {
+  await withClient(async (client) => {
+    const result = await client.callTool({ name: 'get_accounts', arguments: { detail: 'full' } });
+    const output = result.structuredContent as {
+      data: { accounts: unknown[]; balance_context: Record<string, unknown> };
+    };
+    assert.deepEqual(output.data.accounts, [account]);
+    assert.equal(output.data.balance_context.available_balance_provided, false);
+    assert.equal(output.data.balance_context.bank_freshness, 'unverified');
   });
 });
 
