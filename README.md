@@ -50,11 +50,17 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `create_manual_account`, `update_account`, `delete_account`
 - `upload_account_balance_history` — import CSV balances for a manual account
 
-Account reads and refresh results include `balance_context`: the source is
-`monarch`, `available_balance_provided` is false, `pending_transactions_included`
-is `unknown`, and `bank_freshness` is `unverified`. The MCP's upstream account query does
-not provide bank available balances. Use the bank's available balance for
-spendable-cash thresholds. `get_transactions` exposes `pending` on each item;
+Account reads and refresh results include per-account `available_balance_supported`
+and `available_balance`. The latter comes from Monarch's read-only
+`displayBalancePreview(useAvailableBalance: true, invertSyncedBalance: false)`,
+in the existing accounts query. Unsupported accounts and missing values return
+null; current balance is never substituted. `use_available_balance` reports the
+account's display preference, which this read does not change or depend on.
+
+The shared `balance_context` identifies the source as `monarch`,
+`pending_transactions_included` as `unknown`, and `bank_freshness` as `unverified`.
+Version 0.6.0 removes the incorrect global `available_balance_provided: false`;
+capability and values belong to each account. `get_transactions` exposes `pending` on each item;
 pending debits can explain a discrepancy, but subtracting them automatically
 could double-count amounts already reflected by a provider.
 

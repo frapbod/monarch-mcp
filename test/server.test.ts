@@ -17,6 +17,9 @@ const account = {
   mask: '1234',
   currentBalance: 2500,
   displayBalance: 2500,
+  availableBalance: 2100,
+  canUseAvailableBalance: true,
+  useAvailableBalance: false,
   type: { name: 'depository', display: 'Depository' },
   subtype: { name: 'checking', display: 'Checking' },
   institution: { id: 'institution-1', name: 'Bank' },
@@ -243,10 +246,13 @@ test('compact account results distinguish reported balances and institution meta
       data: { accounts: Array<Record<string, unknown>>; balance_context: Record<string, unknown> };
     };
     assert.match(JSON.stringify(result.content), /Found 1 Monarch accounts/);
-    assert.match(JSON.stringify(result.content), /bank available balances.*not verified/);
+    assert.match(JSON.stringify(result.content), /Bank freshness is not verified/);
     assert.doesNotMatch(JSON.stringify(result.content), /account-123/);
     assert.equal(output.data.accounts[0]?.id, 'account-123');
     assert.equal(output.data.accounts[0]?.current_balance, 2500);
+    assert.equal(output.data.accounts[0]?.available_balance, 2100);
+    assert.equal(output.data.accounts[0]?.available_balance_supported, true);
+    assert.equal(output.data.accounts[0]?.use_available_balance, false);
     assert.equal(output.data.accounts[0]?.institution_status, 'healthy');
     assert.equal(output.data.accounts[0]?.monarch_last_updated_at, '2026-09-01T12:00:00Z');
     assert.equal(output.data.accounts[0]?.balance, undefined);
@@ -254,7 +260,6 @@ test('compact account results distinguish reported balances and institution meta
     assert.equal(output.data.accounts[0]?.last_updated_at, undefined);
     assert.deepEqual(output.data.balance_context, {
       source: 'monarch',
-      available_balance_provided: false,
       pending_transactions_included: 'unknown',
       bank_freshness: 'unverified',
     });
@@ -268,7 +273,7 @@ test('full account results preserve upstream fields and still disclose balance l
       data: { accounts: unknown[]; balance_context: Record<string, unknown> };
     };
     assert.deepEqual(output.data.accounts, [account]);
-    assert.equal(output.data.balance_context.available_balance_provided, false);
+    assert.equal(output.data.balance_context.available_balance_provided, undefined);
     assert.equal(output.data.balance_context.bank_freshness, 'unverified');
   });
 });

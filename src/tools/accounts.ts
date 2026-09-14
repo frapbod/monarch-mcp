@@ -27,13 +27,12 @@ const accountId = z.string().min(1).describe('Monarch account ID from get_accoun
 
 const balanceContext = {
   source: 'monarch',
-  available_balance_provided: false,
   pending_transactions_included: 'unknown',
   bank_freshness: 'unverified',
 } as const;
 
 const balanceNotice =
-  'Monarch-reported balances; bank available balances and bank freshness are not verified. Use get_transactions to inspect pending items; do not assume they can be subtracted without double-counting.';
+  "Monarch-reported balances. available_balance uses Monarch's available-balance preview when supported by the account, independent of its display setting; otherwise null. Bank freshness is not verified. Do not subtract pending transactions automatically.";
 
 export function registerAccountTools(
   server: McpServer,
