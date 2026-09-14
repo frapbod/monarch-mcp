@@ -161,8 +161,14 @@ test('retroactive rules report every snapshot, write, verification, and journal 
 });
 
 test('account refresh reports upstream progress', async () => {
+  let reads = 0;
   const client = {
-    getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
+    getAccounts: async () => ({
+      accounts: [
+        { ...account, canUseAvailableBalance: true, availableBalance: ++reads === 1 ? 20 : 7 },
+      ],
+      householdPreferences: {},
+    }),
     requestAccountsRefreshAndWait: async (options: {
       onProgress: (state: { completed: number; total: number; elapsedMs: number }) => void;
     }) => {
@@ -180,6 +186,12 @@ test('account refresh reports upstream progress', async () => {
     );
     assert.notEqual(result.isError, true);
     assert.deepEqual(progress, [1, 2]);
+    const { data } = result.structuredContent as {
+      data: { accounts: Array<Record<string, unknown>> };
+    };
+    assert.equal(reads, 2);
+    assert.equal(data.accounts[0]?.available_balance_supported, true);
+    assert.equal(data.accounts[0]?.available_balance, 7);
   });
 });
 
@@ -209,11 +221,12 @@ for (const complete of [true, false, null]) {
       assert.equal(data.complete, complete);
       assert.equal(data.completion_scope, 'monarch_sync');
       assert.equal(data.balance_context.bank_freshness, 'unverified');
-      assert.equal(data.balance_context.available_balance_provided, false);
+      assert.equal(data.accounts[0]?.available_balance_supported, false);
+      assert.equal(data.accounts[0]?.available_balance, null);
       assert.equal(data.balance_context.pending_transactions_included, 'unknown');
       assert.equal(data.accounts[0]?.current_balance, 10);
       assert.equal(data.accounts[0]?.monarch_last_updated_at, account.displayLastUpdatedAt);
-      assert.match(JSON.stringify(result.content), /bank available balances.*not verified/);
+      assert.match(JSON.stringify(result.content), /Bank freshness is not verified/);
 
       const status = await mcp.callTool({
         name: 'get_refresh_status',

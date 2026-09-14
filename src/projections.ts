@@ -7,6 +7,9 @@ export function compactAccount(account: Account): Record<string, unknown> {
     mask: account.mask,
     current_balance: account.currentBalance,
     display_balance: account.displayBalance,
+    available_balance: account.availableBalance ?? null,
+    available_balance_supported: account.canUseAvailableBalance === true,
+    use_available_balance: account.useAvailableBalance ?? null,
     type: { name: account.type.name, display: account.type.display },
     subtype: { name: account.subtype.name, display: account.subtype.display },
     institution: account.institution
