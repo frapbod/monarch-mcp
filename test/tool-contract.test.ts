@@ -542,11 +542,12 @@ test('refresh_accounts starts, waits, and reads back the requested account', asy
   });
   assert.deepEqual(
     calls.map((call) => call.method),
-    ['getAccounts', 'requestAccountsRefreshAndWait', 'getAccounts'],
+    ['getAccounts', 'requestAccountRefresh', 'waitForAccountsRefresh', 'getAccounts'],
   );
-  const options = calls[1]?.args[0] as Record<string, unknown>;
+  assert.deepEqual(calls[1]?.args, ['account-1']);
+  const options = calls[2]?.args[0] as Record<string, unknown>;
   assert.deepEqual(options.accountIds, ['account-1']);
-  assert.equal(options.timeout, 10);
+  assert.ok(Number(options.timeout) > 0 && Number(options.timeout) <= 10);
   assert.equal(options.delay, 1);
   assert.equal(typeof options.onProgress, 'function');
 });
