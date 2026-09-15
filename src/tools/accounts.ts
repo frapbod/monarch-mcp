@@ -239,7 +239,7 @@ export function registerAccountTools(
     {
       name: 'refresh_accounts',
       title: 'Refresh linked accounts',
-      description: `Request a Monarch sync, wait for completion by default, then re-read Monarch account metadata. complete only reports Monarch sync completion, not newer bank data. Omit account_ids to refresh every account. ${balanceNotice}`,
+      description: `Request a Monarch sync for eligible accounts, wait for existing or newly requested syncs by default, then re-read Monarch account metadata. complete only reports Monarch sync completion, not newer bank data. Omit account_ids to refresh every account. ${balanceNotice}`,
       inputSchema: z.object({
         account_ids: z.array(accountId).min(1).optional(),
         wait: z.boolean().default(true),
@@ -251,17 +251,30 @@ export function registerAccountTools(
     async ({ account_ids, wait, timeout_seconds, poll_seconds }, context) => {
       throwIfCancelled(context);
       const before = await session.read((client) => client.getAccounts());
-      const ids = account_ids ?? before.accounts.map((account) => account.id);
-      const startedAt = Date.now();
+      const ids = [...new Set(account_ids ?? before.accounts.map((account) => account.id))];
+      const startedAt = performance.now();
+      const requestedIds: string[] = [];
+      const selected = ids.map((id) => {
+        const account = before.accounts.find((candidate) => candidate.id === id);
+        if (!account) invalidInput('Selected account was not returned by Monarch');
+        return account;
+      });
+      for (const account of selected) {
+        if (account.canBeForceRefreshed === false) continue;
+        throwIfCancelled(context);
+        await session.write((client) => client.requestAccountRefresh(account.id));
+        requestedIds.push(account.id);
+      }
+      const deadline = performance.now() + timeout_seconds * 1000;
       const progress: Array<{ completed: number; total: number; elapsed_ms: number }> = [];
       const notifications: Promise<void>[] = [];
 
       let complete = false;
       if (wait) {
-        complete = await session.write((client) =>
-          client.requestAccountsRefreshAndWait({
+        complete = await session.read((client) =>
+          client.waitForAccountsRefresh({
             accountIds: ids,
-            timeout: timeout_seconds,
+            timeout: Math.max(0, (deadline - performance.now()) / 1000),
             delay: poll_seconds,
             onProgress: (state) => {
               throwIfCancelled(
@@ -284,8 +297,6 @@ export function registerAccountTools(
             },
           }),
         );
-      } else {
-        await session.write((client) => client.requestAccountsRefresh(ids));
       }
 
       await Promise.all(notifications);
@@ -304,7 +315,8 @@ export function registerAccountTools(
           completion_scope: 'monarch_sync',
           balance_context: balanceContext,
           account_ids: ids,
-          elapsed_ms: Date.now() - startedAt,
+          requested_account_ids: requestedIds,
+          elapsed_ms: Math.round(performance.now() - startedAt),
           progress,
           accounts: after.accounts
             .filter((account) => ids.includes(account.id))
@@ -315,8 +327,8 @@ export function registerAccountTools(
             ? complete
               ? `Monarch reports sync complete for ${ids.length} accounts.`
               : `Refresh did not complete within ${timeout_seconds} seconds.`
-            : `Started refresh for ${ids.length} accounts.`
-        } ${balanceNotice}`,
+            : `Selected ${ids.length} accounts.`
+        } Requested ${requestedIds.length} new refreshes; Monarch determines refresh eligibility. ${balanceNotice}`,
       };
     },
   );

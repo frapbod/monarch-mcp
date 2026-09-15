@@ -6,9 +6,11 @@ import test from 'node:test';
 
 import { Client, InMemoryTransport, type Progress } from '@modelcontextprotocol/client';
 
+import { RequestFailedException } from '@hakimelek/monarchmoney';
+
 import { FileChangeStore } from '../src/changes.js';
 import { createServer } from '../src/server.js';
-import type { MonarchAccess, MonarchClient } from '../src/session.js';
+import { MonarchSession, type MonarchAccess, type MonarchClient } from '../src/session.js';
 
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -46,6 +48,7 @@ const account = {
 async function withClient(
   monarch: MonarchClient,
   callback: (client: Client, changes: FileChangeStore) => Promise<void>,
+  accessOverride?: MonarchAccess,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-progress-'));
   const changes = new FileChangeStore(directory);
@@ -53,7 +56,7 @@ async function withClient(
     read: async (operation) => operation(monarch),
     write: async (operation) => operation(monarch),
   };
-  const server = createServer(access, changes);
+  const server = createServer(accessOverride ?? access, changes);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'progress-test', version: '1.0.0' });
   await server.connect(serverTransport);
@@ -169,7 +172,8 @@ test('account refresh reports upstream progress', async () => {
       ],
       householdPreferences: {},
     }),
-    requestAccountsRefreshAndWait: async (options: {
+    requestAccountRefresh: async () => true,
+    waitForAccountsRefresh: async (options: {
       onProgress: (state: { completed: number; total: number; elapsedMs: number }) => void;
     }) => {
       options.onProgress({ completed: 1, total: 2, elapsedMs: 10 });
@@ -199,7 +203,8 @@ for (const complete of [true, false, null]) {
   test(`refresh completion ${complete} never verifies bank freshness or available cash`, async () => {
     const client = {
       getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
-      requestAccountsRefreshAndWait: async () => complete,
+      requestAccountRefresh: async () => true,
+      waitForAccountsRefresh: async () => complete,
       requestAccountsRefresh: async () => undefined,
       isAccountsRefreshComplete: async () => complete === true,
     } as unknown as MonarchClient;
@@ -249,7 +254,8 @@ test('cancelling refresh polling stops the wait after the in-flight refresh requ
       accountReads += 1;
       return { accounts: [account], householdPreferences: {} };
     },
-    requestAccountsRefreshAndWait: async (options: {
+    requestAccountRefresh: async () => true,
+    waitForAccountsRefresh: async (options: {
       onProgress: (state: { completed: number; total: number; elapsedMs: number }) => void;
     }) => {
       options.onProgress({ completed: 0, total: 1, elapsedMs: 0 });
@@ -483,4 +489,89 @@ test('cancelling an active undo stops new writes and marks partial work uncertai
     else process.env.MONARCH_MCP_EVENT_LOG = previousEventLog;
     rmSync(eventDirectory, { recursive: true, force: true });
   }
+});
+
+test('refresh authentication recovery never repeats accepted writes or resets the wait budget', async () => {
+  let requests = 0;
+  const budgets: number[] = [];
+  const session = new MonarchSession(
+    { email: 'test@example.com', password: 'test', sessionFile: '/unused', timeoutSeconds: 30 },
+    () => {
+      const client = {
+        token: 'test-token',
+        login: async () => undefined,
+        getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
+        requestAccountRefresh: async () => {
+          requests += 1;
+          return true;
+        },
+        requestAccountsRefresh: async () => {
+          requests += 1;
+          return true;
+        },
+        waitForAccountsRefresh: async (options: { timeout: number }) => {
+          budgets.push(options.timeout);
+          if (budgets.length === 1) {
+            await delay(20);
+            throw new RequestFailedException('expired during polling', { statusCode: 401 });
+          }
+          return true;
+        },
+        requestAccountsRefreshAndWait: async (options: { timeout: number }) => {
+          await client.requestAccountsRefresh();
+          return client.waitForAccountsRefresh(options);
+        },
+      };
+      return client as unknown as MonarchClient;
+    },
+  );
+  await withClient(
+    {} as MonarchClient,
+    async (mcp) => {
+      const result = await mcp.callTool({
+        name: 'refresh_accounts',
+        arguments: { account_ids: [account.id] },
+      });
+      assert.notEqual(result.isError, true);
+      assert.equal(
+        requests,
+        1,
+        'an authentication error in a status read must not replay the refresh',
+      );
+      assert.equal(budgets.length, 2);
+      assert.ok(budgets[1]! < budgets[0]!, 'reauthentication must use the remaining wait budget');
+    },
+    session,
+  );
+});
+
+test('refresh waits for existing work without requesting an ineligible account again', async () => {
+  let requests = 0;
+  const client = {
+    getAccounts: async () => ({
+      accounts: [{ ...account, canBeForceRefreshed: false }],
+      householdPreferences: {},
+    }),
+    requestAccountRefresh: async () => {
+      requests += 1;
+      return true;
+    },
+    requestAccountsRefreshAndWait: async () => {
+      requests += 1;
+      return false;
+    },
+    waitForAccountsRefresh: async () => false,
+  } as unknown as MonarchClient;
+  await withClient(client, async (mcp) => {
+    const result = await mcp.callTool({
+      name: 'refresh_accounts',
+      arguments: { account_ids: [account.id] },
+    });
+    assert.notEqual(result.isError, true);
+    assert.equal(requests, 0);
+    assert.equal(
+      (result.structuredContent as { data: { complete: boolean } }).data.complete,
+      false,
+    );
+  });
 });

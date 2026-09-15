@@ -77,6 +77,12 @@ time nor the MCP's `meta.retrieved_at` proves bank freshness. See Monarch's
 [refresh explanation](https://help.monarch.com/hc/en-us/articles/360054839131-Refreshing-Your-Accounts)
 and [pending-transaction guidance](https://help.monarch.com/hc/en-us/articles/360048393352-Connection-issues).
 
+Refreshes honor Monarch's `canBeForceRefreshed` flag; ineligible accounts are not
+requested again. `requested_account_ids` distinguishes new requests from
+accounts whose existing sync is being checked. Status polling uses the read
+client independently of the mutation, so reauthentication cannot resubmit a
+refresh or reset the remaining polling budget.
+
 ### Transactions
 
 - `get_transactions` — complete filters, including review state, and explicit offset pagination
