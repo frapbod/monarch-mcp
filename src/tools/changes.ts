@@ -415,21 +415,24 @@ export function registerChangeTools(
       name: 'get_change_history',
       title: 'Get change history',
       description:
-        'Inspect agent-made Monarch changes and recovery status. Supply change_id to include saved undo and redo operations.',
+        'Inspect agent-made Monarch changes and recovery status, newest first. Follow next_offset while has_more is true. Supply change_id to include saved undo and redo operations (ignores pagination).',
       inputSchema: z.object({
         change_id: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(100).default(20),
+        offset: z.number().int().nonnegative().default(0),
       }),
       hints: READ_ONLY,
     },
-    async ({ change_id, limit }) => {
+    async ({ change_id, limit, offset }) => {
       if (change_id) {
         const change = changes.get(change_id);
         if (!change) throw new Error(`Change ${change_id} was not found`);
         return { data: { change }, summary: `Retrieved change ${change_id}.` };
       }
-      const history = changes
-        .list(limit)
+      const page = changes.list(limit + 1, offset);
+      const hasMore = page.length > limit;
+      const history = page
+        .slice(0, limit)
         .map(
           ({
             undo: _undo,
@@ -441,7 +444,12 @@ export function registerChangeTools(
           }) => change,
         );
       return {
-        data: { changes: history },
+        data: {
+          changes: history,
+          offset,
+          next_offset: hasMore ? offset + history.length : null,
+          has_more: hasMore,
+        },
         summary: `Retrieved ${history.length} recorded Monarch changes.`,
       };
     },
