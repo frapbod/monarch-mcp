@@ -178,7 +178,7 @@ export interface ChangeStore {
   markUndoing(id: string): ChangeRecord;
   markRedoing(id: string): ChangeRecord;
   get(id: string): ChangeRecord | undefined;
-  list(limit: number): ChangeRecord[];
+  list(limit: number, offset?: number): ChangeRecord[];
   markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord;
   markRedone(id: string, guards?: ChangeGuard[]): ChangeRecord;
 }
@@ -346,7 +346,7 @@ export class FileChangeStore implements ChangeStore {
     }
   }
 
-  list(limit: number): ChangeRecord[] {
+  list(limit: number, offset = 0): ChangeRecord[] {
     let names: string[];
     try {
       names = readdirSync(this.directory).filter((name) => name.endsWith('.json'));
@@ -358,8 +358,11 @@ export class FileChangeStore implements ChangeStore {
     return names
       .map((name) => this.get(name.slice(0, -5)))
       .filter((record): record is ChangeRecord => record !== undefined)
-      .sort((left, right) => right.created_at.localeCompare(left.created_at))
-      .slice(0, limit);
+      .sort(
+        (left, right) =>
+          right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id),
+      )
+      .slice(offset, offset + limit);
   }
 
   markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord {

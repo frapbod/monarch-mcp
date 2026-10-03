@@ -7,8 +7,8 @@ without waiting for an npm release.
 The server uses the stable MCP TypeScript SDK v2 and serves both the modern
 `2026-07-28` protocol and older MCP clients over stdio. Every successful call
 returns concise text plus a schema-declared `structuredContent` envelope; clients
-read the envelope for the data rather than parsing the text. Paginated calls expose
-`total`, `returned`, and `next_offset`; compact records always keep their IDs.
+read the envelope for the data rather than parsing the text. Transaction pagination
+exposes `total`, `returned`, and `next_offset`; compact records always keep their IDs.
 
 ## Run
 
@@ -108,6 +108,15 @@ refresh or reset the remaining polling budget.
 - `get_change_history` — inspect change IDs, affected counts, status, and saved inverse operations
 - `undo_change` — idempotently reverse a journaled change
 - `redo_change` — reapply an undone stable-ID update
+
+History lists preserve `data.changes` and add `data.offset`, `data.next_offset`,
+and `data.has_more`. Start with `offset=0` (the default), then pass `next_offset`
+until it is null and `has_more` is false. `limit` defaults to 20 and accepts 1–100.
+Empty or past-end pages return an empty list, null `next_offset`, and false
+`has_more`. Records sort newest first, with descending change ID breaking timestamp
+ties. Pagination is not a snapshot: new journal entries between calls can shift
+offsets. Supplying `change_id` still returns only `data.change`, including saved
+recovery operations, and ignores pagination.
 
 Transaction edits, bulk review work, recurring corrections, and rule changes are
 journaled before the upstream write as atomic mode-0600 records. The local
