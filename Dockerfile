@@ -3,6 +3,7 @@ FROM node:${NODE_VERSION}-bookworm-slim AS build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY vendor ./vendor
 RUN npm ci --ignore-scripts
 
 COPY tsconfig.json tsconfig.build.json ./
