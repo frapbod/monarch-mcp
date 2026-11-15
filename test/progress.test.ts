@@ -204,7 +204,10 @@ for (const complete of [true, false, null]) {
     const client = {
       getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
       requestAccountRefresh: async () => true,
-      waitForAccountsRefresh: async () => complete,
+      waitForAccountsRefresh: async () => {
+        if (complete === null) throw new Error('the default call must not wait for the sync');
+        return complete;
+      },
       requestAccountsRefresh: async () => undefined,
       isAccountsRefreshComplete: async () => complete === true,
     } as unknown as MonarchClient;
@@ -212,7 +215,7 @@ for (const complete of [true, false, null]) {
     await withClient(client, async (mcp) => {
       const result = await mcp.callTool({
         name: 'refresh_accounts',
-        arguments: { account_ids: ['account-1'], wait: complete !== null },
+        arguments: { account_ids: ['account-1'], ...(complete === null ? {} : { wait: true }) },
       });
       assert.notEqual(result.isError, true);
       const { data } = result.structuredContent as {
@@ -530,7 +533,7 @@ test('refresh authentication recovery never repeats accepted writes or resets th
     async (mcp) => {
       const result = await mcp.callTool({
         name: 'refresh_accounts',
-        arguments: { account_ids: [account.id] },
+        arguments: { account_ids: [account.id], wait: true },
       });
       assert.notEqual(result.isError, true);
       assert.equal(
@@ -565,7 +568,7 @@ test('refresh waits for existing work without requesting an ineligible account a
   await withClient(client, async (mcp) => {
     const result = await mcp.callTool({
       name: 'refresh_accounts',
-      arguments: { account_ids: [account.id] },
+      arguments: { account_ids: [account.id], wait: true },
     });
     assert.notEqual(result.isError, true);
     assert.equal(requests, 0);

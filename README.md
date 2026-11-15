@@ -46,7 +46,8 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `get_institutions` — linked credentials and connection state
 - `get_subscription` — plan and entitlement metadata
 - `get_refresh_status` — whether a requested institution sync is still running
-- `refresh_accounts` — start a sync and, by default, wait and re-read the accounts
+- `refresh_accounts` — start a sync and return at once; `wait=true` blocks until the
+  sync is done (up to `timeout_seconds`, default 300) and re-reads the accounts
 - `create_manual_account`, `update_account`, `delete_account`
 - `upload_account_balance_history` — import CSV balances for a manual account
 

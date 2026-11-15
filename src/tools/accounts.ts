@@ -239,10 +239,10 @@ export function registerAccountTools(
     {
       name: 'refresh_accounts',
       title: 'Refresh linked accounts',
-      description: `Request a Monarch sync for eligible accounts, wait for existing or newly requested syncs by default, then re-read Monarch account metadata. complete only reports Monarch sync completion, not newer bank data. Omit account_ids to refresh every account. ${balanceNotice}`,
+      description: `Request a Monarch sync for eligible accounts and return at once with complete=null; poll get_refresh_status until the sync is done, then read the accounts. Pass wait=true to block until the sync is done or timeout_seconds passes, then re-read the accounts. complete only reports Monarch sync completion, not newer bank data. Omit account_ids to refresh every account. ${balanceNotice}`,
       inputSchema: z.object({
         account_ids: z.array(accountId).min(1).optional(),
-        wait: z.boolean().default(true),
+        wait: z.boolean().default(false),
         timeout_seconds: z.number().int().min(10).max(600).default(300),
         poll_seconds: z.number().int().min(1).max(30).default(5),
       }),
@@ -327,7 +327,7 @@ export function registerAccountTools(
             ? complete
               ? `Monarch reports sync complete for ${ids.length} accounts.`
               : `Refresh did not complete within ${timeout_seconds} seconds.`
-            : `Selected ${ids.length} accounts.`
+            : `Selected ${ids.length} accounts; did not wait for the sync, poll get_refresh_status.`
         } Requested ${requestedIds.length} new refreshes; Monarch determines refresh eligibility. ${balanceNotice}`,
       };
     },
