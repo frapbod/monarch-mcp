@@ -76,11 +76,6 @@ interface ToolPayload {
   readonly cancelled?: boolean;
   readonly ambiguous?: boolean;
   readonly page?: PageMetadata;
-  readonly change?: {
-    readonly id: string;
-    readonly affectedCount: number;
-    readonly reversible: boolean;
-  };
 }
 
 interface ToolHints {
@@ -175,13 +170,6 @@ export function addTool<Shape extends z.ZodRawShape>(
           readOnly: spec.hints.readOnlyHint,
           destructive: spec.hints.destructiveHint,
           idempotent: spec.hints.idempotentHint,
-          ...(result.change
-            ? {
-                changeId: result.change.id,
-                affectedCount: result.change.affectedCount,
-                reversible: result.change.reversible,
-              }
-            : {}),
         });
         return response;
       } catch (error) {
@@ -193,13 +181,6 @@ export function addTool<Shape extends z.ZodRawShape>(
           destructive: spec.hints.destructiveHint,
           idempotent: spec.hints.idempotentHint,
           errorKind: classifyError(error),
-          ...(error instanceof RequestCancelledError && error.change
-            ? {
-                changeId: error.change.id,
-                affectedCount: error.completedCount,
-                reversible: error.change.reversible,
-              }
-            : {}),
         });
         const message = error instanceof Error ? error.message : String(error);
         return {

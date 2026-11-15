@@ -30,7 +30,7 @@ async function withClient(
   }
 }
 
-test('undo and redo protect targeted fields without blocking unrelated edits', async () => {
+test('undo protects targeted fields without blocking unrelated edits', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'monarch-mcp-changes-'));
   const changes = new FileChangeStore(directory);
   const transaction = {
@@ -90,34 +90,36 @@ test('undo and redo protect targeted fields without blocking unrelated edits', a
       assert.equal(transaction.needsReview, true);
       assert.equal(transaction.notes, 'Unrelated human edit');
       assert.equal(changes.get(updateData.data.change_id)?.status, 'undone');
-      assert.ok(changes.get(updateData.data.change_id)?.redo_guards?.length);
 
+      const repeated = await mcp.callTool({
+        name: 'undo_change',
+        arguments: { change_id: updateData.data.change_id },
+      });
+      assert.match(JSON.stringify(repeated.content), /already undone/);
+      assert.equal(transaction.merchant.name, 'Old merchant');
+
+      const second = await mcp.callTool({
+        name: 'update_transaction',
+        arguments: { transaction_id: 'transaction-1', merchant_name: 'New merchant' },
+      });
+      const secondId = (second.structuredContent as { data: { change_id: string } }).data.change_id;
       transaction.merchant.name = 'Newer human edit';
       const conflicted = await mcp.callTool({
-        name: 'redo_change',
-        arguments: { change_id: updateData.data.change_id },
+        name: 'undo_change',
+        arguments: { change_id: secondId },
       });
       assert.equal(conflicted.isError, true);
       assert.match(JSON.stringify(conflicted.content), /conflicts with newer Monarch state/);
       assert.equal(transaction.merchant.name, 'Newer human edit');
-      assert.equal(changes.get(updateData.data.change_id)?.status, 'undone');
+      assert.equal(changes.get(secondId)?.status, 'active');
 
-      const redone = await mcp.callTool({
-        name: 'redo_change',
-        arguments: { change_id: updateData.data.change_id, force: true },
+      const forced = await mcp.callTool({
+        name: 'undo_change',
+        arguments: { change_id: secondId, force: true },
       });
-      assert.notEqual(redone.isError, true);
-      assert.equal(transaction.merchant.name, 'New merchant');
-      assert.equal(transaction.needsReview, false);
-      assert.equal(transaction.notes, 'Unrelated human edit');
-      assert.equal(changes.get(updateData.data.change_id)?.status, 'active');
-
-      const repeated = await mcp.callTool({
-        name: 'redo_change',
-        arguments: { change_id: updateData.data.change_id },
-      });
-      assert.match(JSON.stringify(repeated.content), /already redone/);
-      assert.equal(transaction.merchant.name, 'New merchant');
+      assert.notEqual(forced.isError, true);
+      assert.equal(transaction.merchant.name, 'Old merchant');
+      assert.equal(changes.get(secondId)?.status, 'undone');
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });

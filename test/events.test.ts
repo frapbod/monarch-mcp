@@ -161,7 +161,6 @@ test('an unverified mutation is measured as ambiguous rather than successful', a
       .map((line) => JSON.parse(line));
     assert.equal(event.outcome, 'ambiguous');
     assert.equal(event.tool, 'update_transaction');
-    assert.match(event.change_id, /^chg_/);
   } finally {
     await client.close();
     await handler.close();

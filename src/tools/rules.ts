@@ -274,7 +274,6 @@ async function completeRuleChange(
   matches: Transaction[],
   undo: ChangeStep[],
   appliedCount: number,
-  redo?: ChangeStep[],
 ): Promise<{ change: ChangeRecord; exactUndo: boolean }> {
   const total = ruleProgressTotal(matches.length);
   await reportProgress(
@@ -305,7 +304,6 @@ async function completeRuleChange(
       ? null
       : "Monarch's applied count differed from the locally previewed transaction set.",
     undo,
-    ...(redo ? { redo } : {}),
     guards,
   });
   if (countMatches && matches.length) {
@@ -456,7 +454,6 @@ export function registerRuleTools(
         summary: `Created rule ${created.id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
         cancelled: requestCancelled(context),
         ambiguous: !exactUndo,
-        change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },
   );
@@ -529,15 +526,6 @@ export function registerRuleTools(
         matches,
         [...historicalUndo, { operation: 'update_transaction_rule', id: rule_id, values: restore }],
         appliedCount,
-        matches.length
-          ? undefined
-          : [
-              {
-                operation: 'update_transaction_rule',
-                id: rule_id,
-                values: ruleRestoreInput(updated),
-              },
-            ],
       );
       return {
         data: {
@@ -549,7 +537,6 @@ export function registerRuleTools(
         summary: `Updated rule ${rule_id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
         cancelled: requestCancelled(context),
         ambiguous: !exactUndo,
-        change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },
   );
@@ -582,7 +569,6 @@ export function registerRuleTools(
       return {
         data: { deleted: true, rule_id, change_id: change.id },
         summary: `Deleted rule ${rule_id}; recreate it with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );

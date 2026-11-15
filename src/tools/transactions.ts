@@ -372,7 +372,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created transaction for ${args.merchant_name}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: account ? 2 : 1, reversible: true },
       };
     },
   );
@@ -402,7 +401,6 @@ export function registerTransactionTools(
         affected_count: 1,
         reversible: true,
         undo: [{ operation: 'update_transaction', id: transaction_id, values: previous }],
-        redo: [{ operation: 'update_transaction', id: transaction_id, values: expected }],
       });
       const { result, writeError, verified, guard } = await observeTransactionUpdate(
         session,
@@ -424,7 +422,6 @@ export function registerTransactionTools(
           ? `Updated transaction ${transaction_id}; undo with ${change.id}.`
           : `Transaction ${transaction_id} could not be verified after the write; restore with ${change.id}.`,
         ambiguous: !verified,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -520,7 +517,6 @@ export function registerTransactionTools(
           result: BulkResult;
           guard?: TransactionGuard;
           undo?: ChangeStep;
-          redo?: ChangeStep;
           attempted: boolean;
         };
         if (plan.kind === 'failed') {
@@ -545,11 +541,6 @@ export function registerTransactionTools(
             },
             ...(guard ? { guard } : {}),
             undo: plan.undo,
-            redo: {
-              operation: 'update_transaction' as const,
-              id: transaction_id,
-              values: expected,
-            },
             attempted: true,
           };
         }
@@ -572,7 +563,6 @@ export function registerTransactionTools(
         ? activatePrepared(changes, prepared.id, {
             affected_count: attempted.length,
             undo: attempted.flatMap((outcome) => (outcome.undo ? [outcome.undo] : [])),
-            redo: attempted.flatMap((outcome) => (outcome.redo ? [outcome.redo] : [])),
             guards: attempted.flatMap((outcome) => (outcome.guard ? [outcome.guard] : [])),
           })
         : undefined;
@@ -595,9 +585,6 @@ export function registerTransactionTools(
         summary: `Verified ${updatedCount}, ambiguous ${ambiguousCount}, failed ${failedCount}, and cancelled ${cancelledCount} of ${results.length} transaction updates${change ? `; undo attempted writes with ${change.id}` : ''}.`,
         cancelled: cancelledCount > 0 || requestCancelled(context),
         ambiguous: ambiguousCount > 0,
-        ...(change
-          ? { change: { id: change.id, affectedCount: attempted.length, reversible: true } }
-          : {}),
       };
     },
   );
@@ -633,7 +620,6 @@ export function registerTransactionTools(
       return {
         data: { deleted, transaction_id, change_id: change.id },
         summary: `Deleted transaction ${transaction_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1, reversible: false },
       };
     },
   );
@@ -677,13 +663,6 @@ export function registerTransactionTools(
               splits: transactionSplitValues(before),
             },
           ],
-          redo: [
-            {
-              operation: 'set_transaction_splits',
-              id: transaction_id,
-              splits: requestedSplits,
-            },
-          ],
         },
         () =>
           session.write((client) =>
@@ -696,7 +675,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Set ${splits.length} split legs on transaction ${transaction_id}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -724,7 +702,6 @@ export function registerTransactionTools(
           affected_count: 1,
           reversible: true,
           undo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: oldTags }],
-          redo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: tag_ids }],
         },
         () => session.write((client) => client.setTransactionTags(transaction_id, tag_ids)),
         () => ({ guards: [{ kind: 'transaction', id: transaction_id, tagIds: tag_ids }] }),
@@ -732,7 +709,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Set ${tag_ids.length} tags on transaction ${transaction_id}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -780,7 +756,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created transaction tag "${name}"; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -818,7 +793,6 @@ export function registerTransactionTools(
       return {
         data: { deleted: true, tag_id, change_id: change.id },
         summary: `Deleted transaction tag ${tag_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1 + affected.length, reversible: false },
       };
     },
   );
@@ -873,7 +847,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created transaction category "${name}"; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -926,7 +899,6 @@ export function registerTransactionTools(
       return {
         data: { deleted, category_id, change_id: change.id },
         summary: `Deleted category ${category_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1 + affected.length, reversible: false },
       };
     },
   );

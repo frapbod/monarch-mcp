@@ -24,7 +24,7 @@ const noUpstream: MonarchAccess = {
 };
 
 interface HistoryPage {
-  changes: Array<Omit<ChangeRecord, 'undo' | 'redo' | 'guards' | 'redo_guards' | 'snapshot'>>;
+  changes: Array<Omit<ChangeRecord, 'undo' | 'guards' | 'snapshot'>>;
   offset: number;
   next_offset: number | null;
   has_more: boolean;
@@ -46,9 +46,7 @@ async function withHistory(
       reversible: true,
       status: 'active',
       undo: [{ operation: 'update_transaction', id: 'transaction-1', values: { amount: 1 } }],
-      redo: [{ operation: 'update_transaction', id: 'transaction-1', values: { amount: 2 } }],
       guards: [{ kind: 'transaction', id: 'transaction-1', values: { amount: 2 } }],
-      redo_guards: [{ kind: 'transaction', id: 'transaction-1', values: { amount: 1 } }],
       snapshot: { private: 'saved state' },
     }),
   );
@@ -88,7 +86,7 @@ async function history(client: Client, args: Record<string, unknown> = {}): Prom
     { type: 'text', text: `Retrieved ${output.data.changes.length} recorded Monarch changes.` },
   ]);
   for (const record of output.data.changes) {
-    for (const field of ['undo', 'redo', 'guards', 'redo_guards', 'snapshot']) {
+    for (const field of ['undo', 'guards', 'snapshot']) {
       assert.equal(field in record, false);
     }
   }
