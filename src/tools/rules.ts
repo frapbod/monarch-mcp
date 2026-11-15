@@ -274,7 +274,6 @@ async function completeRuleChange(
   matches: Transaction[],
   undo: ChangeStep[],
   appliedCount: number,
-  redo?: ChangeStep[],
 ): Promise<{ change: ChangeRecord; exactUndo: boolean }> {
   const total = ruleProgressTotal(matches.length);
   await reportProgress(
@@ -305,7 +304,6 @@ async function completeRuleChange(
       ? null
       : "Monarch's applied count differed from the locally previewed transaction set.",
     undo,
-    ...(redo ? { redo } : {}),
     guards,
   });
   if (countMatches && matches.length) {
@@ -529,15 +527,6 @@ export function registerRuleTools(
         matches,
         [...historicalUndo, { operation: 'update_transaction_rule', id: rule_id, values: restore }],
         appliedCount,
-        matches.length
-          ? undefined
-          : [
-              {
-                operation: 'update_transaction_rule',
-                id: rule_id,
-                values: ruleRestoreInput(updated),
-              },
-            ],
       );
       return {
         data: {

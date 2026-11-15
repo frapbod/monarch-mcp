@@ -457,7 +457,6 @@ export function registerAccountTools(
           affected_count: 1,
           reversible: true,
           undo: [{ operation: 'update_account', id: account_id, values: previous }],
-          redo: [{ operation: 'update_account', id: account_id, values: requested }],
         },
         () => session.write((client) => client.updateAccount(account_id, requested)),
         (result) => {

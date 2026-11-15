@@ -402,7 +402,6 @@ export function registerTransactionTools(
         affected_count: 1,
         reversible: true,
         undo: [{ operation: 'update_transaction', id: transaction_id, values: previous }],
-        redo: [{ operation: 'update_transaction', id: transaction_id, values: expected }],
       });
       const { result, writeError, verified, guard } = await observeTransactionUpdate(
         session,
@@ -520,7 +519,6 @@ export function registerTransactionTools(
           result: BulkResult;
           guard?: TransactionGuard;
           undo?: ChangeStep;
-          redo?: ChangeStep;
           attempted: boolean;
         };
         if (plan.kind === 'failed') {
@@ -545,11 +543,6 @@ export function registerTransactionTools(
             },
             ...(guard ? { guard } : {}),
             undo: plan.undo,
-            redo: {
-              operation: 'update_transaction' as const,
-              id: transaction_id,
-              values: expected,
-            },
             attempted: true,
           };
         }
@@ -572,7 +565,6 @@ export function registerTransactionTools(
         ? activatePrepared(changes, prepared.id, {
             affected_count: attempted.length,
             undo: attempted.flatMap((outcome) => (outcome.undo ? [outcome.undo] : [])),
-            redo: attempted.flatMap((outcome) => (outcome.redo ? [outcome.redo] : [])),
             guards: attempted.flatMap((outcome) => (outcome.guard ? [outcome.guard] : [])),
           })
         : undefined;
@@ -677,13 +669,6 @@ export function registerTransactionTools(
               splits: transactionSplitValues(before),
             },
           ],
-          redo: [
-            {
-              operation: 'set_transaction_splits',
-              id: transaction_id,
-              splits: requestedSplits,
-            },
-          ],
         },
         () =>
           session.write((client) =>
@@ -724,7 +709,6 @@ export function registerTransactionTools(
           affected_count: 1,
           reversible: true,
           undo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: oldTags }],
-          redo: [{ operation: 'set_transaction_tags', id: transaction_id, tagIds: tag_ids }],
         },
         () => session.write((client) => client.setTransactionTags(transaction_id, tag_ids)),
         () => ({ guards: [{ kind: 'transaction', id: transaction_id, tagIds: tag_ids }] }),

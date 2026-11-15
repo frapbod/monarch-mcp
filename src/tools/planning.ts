@@ -129,13 +129,6 @@ export function registerPlanningTools(
                 },
               ]
             : [],
-          ...(reversible
-            ? {
-                redo: [
-                  { operation: 'set_budget_amount', values: { ...request, applyToFuture: false } },
-                ],
-              }
-            : {}),
           snapshot: { previous_amount: previousAmount, start_date: effectiveStart },
         },
         () => session.write((client) => client.setBudgetAmount(request)),
@@ -267,13 +260,6 @@ export function registerPlanningTools(
             operation: 'update_recurring_merchant',
             transactionId: transaction_id,
             values: previous,
-          },
-        ],
-        redo: [
-          {
-            operation: 'update_recurring_merchant',
-            transactionId: transaction_id,
-            values: requested,
           },
         ],
       });

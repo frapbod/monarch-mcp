@@ -135,30 +135,18 @@ export interface ChangeRecord {
   readonly reversible: boolean;
   readonly reversibility_reason?: string;
   readonly undo: ChangeStep[];
-  readonly redo?: ChangeStep[];
   readonly guards?: ChangeGuard[];
-  readonly redo_guards?: ChangeGuard[];
   readonly snapshot?: unknown;
-  readonly status: 'prepared' | 'active' | 'undoing' | 'redoing' | 'uncertain' | 'undone';
+  readonly status: 'prepared' | 'active' | 'undoing' | 'uncertain' | 'undone';
   readonly activated_at?: string;
   readonly undo_started_at?: string;
-  readonly redo_started_at?: string;
   readonly uncertain_at?: string;
   readonly undone_at?: string;
-  readonly redone_at?: string;
 }
 
 type ChangeInput = Omit<
   ChangeRecord,
-  | 'id'
-  | 'created_at'
-  | 'status'
-  | 'activated_at'
-  | 'undo_started_at'
-  | 'redo_started_at'
-  | 'uncertain_at'
-  | 'undone_at'
-  | 'redone_at'
+  'id' | 'created_at' | 'status' | 'activated_at' | 'undo_started_at' | 'uncertain_at' | 'undone_at'
 >;
 
 interface ChangeCompletion {
@@ -166,7 +154,6 @@ interface ChangeCompletion {
   readonly reversible?: boolean;
   readonly reversibility_reason?: string | null;
   readonly undo?: ChangeStep[];
-  readonly redo?: ChangeStep[];
   readonly guards?: ChangeGuard[];
   readonly snapshot?: unknown;
 }
@@ -176,11 +163,9 @@ export interface ChangeStore {
   activate(id: string, completion?: ChangeCompletion): ChangeRecord;
   markUncertain(id: string): ChangeRecord;
   markUndoing(id: string): ChangeRecord;
-  markRedoing(id: string): ChangeRecord;
   get(id: string): ChangeRecord | undefined;
   list(limit: number, offset?: number): ChangeRecord[];
-  markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord;
-  markRedone(id: string, guards?: ChangeGuard[]): ChangeRecord;
+  markUndone(id: string): ChangeRecord;
 }
 
 export async function journalMutation<T>(
@@ -329,13 +314,6 @@ export class FileChangeStore implements ChangeStore {
     }));
   }
 
-  markRedoing(id: string): ChangeRecord {
-    return this.update(id, () => ({
-      status: 'redoing',
-      redo_started_at: new Date().toISOString(),
-    }));
-  }
-
   get(id: string): ChangeRecord | undefined {
     try {
       return JSON.parse(readFileSync(this.path(id), 'utf8')) as ChangeRecord;
@@ -365,19 +343,10 @@ export class FileChangeStore implements ChangeStore {
       .slice(offset, offset + limit);
   }
 
-  markUndone(id: string, redoGuards?: ChangeGuard[]): ChangeRecord {
+  markUndone(id: string): ChangeRecord {
     return this.update(id, () => ({
-      ...(redoGuards ? { redo_guards: redoGuards } : {}),
       status: 'undone',
       undone_at: new Date().toISOString(),
-    }));
-  }
-
-  markRedone(id: string, guards?: ChangeGuard[]): ChangeRecord {
-    return this.update(id, () => ({
-      ...(guards ? { guards } : {}),
-      status: 'active',
-      redone_at: new Date().toISOString(),
     }));
   }
 

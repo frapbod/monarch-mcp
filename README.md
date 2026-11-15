@@ -107,7 +107,6 @@ refresh or reset the remaining polling budget.
 
 - `get_change_history` — inspect change IDs, affected counts, status, and saved inverse operations
 - `undo_change` — idempotently reverse a journaled change
-- `redo_change` — reapply an undone stable-ID update
 
 History lists preserve `data.changes` and add `data.offset`, `data.next_offset`,
 and `data.has_more`. Start with `offset=0` (the default), then pass `next_offset`
@@ -124,11 +123,8 @@ journaled before the upstream write as atomic mode-0600 records. The local
 Completed results include their `change_id` and affected count, and ambiguous
 responses retain an `uncertain` journal entry. Before undo, state guards detect
 newer edits and require `force=true` rather than silently overwriting them.
-Undo verifies the restored state and records a second guard before redo becomes
-available. Redo then refuses to overwrite any edit made after undo. Stable-ID
-account, transaction, split, tag, budget, recurring, and non-retroactive rule
-updates are redoable; identity-changing creates and deletes are not presented as
-the same Monarch object after recreation.
+Undo verifies the restored state. There is no redo: to reapply an undone change,
+make the edit again with the normal update tool.
 Retroactive rule application snapshots matching transactions before the rule
 runs, including their tags and splits. If Monarch's reported applied count
 differs from the previewed set, the change is explicitly marked as requiring
