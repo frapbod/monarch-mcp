@@ -10,9 +10,6 @@ interface ToolEvent {
   readonly destructive: boolean;
   readonly idempotent: boolean;
   readonly errorKind?: string;
-  readonly changeId?: string;
-  readonly affectedCount?: number;
-  readonly reversible?: boolean;
 }
 
 export function classifyError(error: unknown): string {
@@ -41,9 +38,6 @@ export function emitToolEvent(event: ToolEvent): void {
     destructive: event.destructive,
     idempotent: event.idempotent,
     ...(event.errorKind ? { error_kind: event.errorKind } : {}),
-    ...(event.changeId ? { change_id: event.changeId } : {}),
-    ...(event.affectedCount !== undefined ? { affected_count: event.affectedCount } : {}),
-    ...(event.reversible !== undefined ? { reversible: event.reversible } : {}),
   };
   const line = `${JSON.stringify(payload)}\n`;
   try {

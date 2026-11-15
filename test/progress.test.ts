@@ -484,8 +484,6 @@ test('cancelling an active undo stops new writes and marks partial work uncertai
       assert.equal(changes.get(change.id)?.status, 'uncertain');
       const event = JSON.parse(readFileSync(eventLog, 'utf8').trim()) as Record<string, unknown>;
       assert.equal(event.outcome, 'cancelled');
-      assert.equal(event.change_id, change.id);
-      assert.equal(event.affected_count, 4);
     });
   } finally {
     if (previousEventLog === undefined) delete process.env.MONARCH_MCP_EVENT_LOG;

@@ -96,10 +96,7 @@ async function undoSteps(
   let nextIndex = 0;
   while (nextIndex < pending.length) {
     if (requestCancelled(context)) {
-      throw new RequestCancelledError(
-        `Undo cancelled after ${completed} of ${steps.length} steps`,
-        completed,
-      );
+      throw new RequestCancelledError(`Undo cancelled after ${completed} of ${steps.length} steps`);
     }
     const next = pending[nextIndex];
     if (!next) break;
@@ -140,7 +137,6 @@ async function undoSteps(
       if (error instanceof RequestCancelledError) {
         throw new RequestCancelledError(
           `Undo cancelled after ${completed} of ${steps.length} steps`,
-          completed,
         );
       }
       throw error;
@@ -373,12 +369,6 @@ async function applyUndo(
     if (changes.get(change.id)?.status === 'undoing') {
       tryMarkUncertain(changes, change.id);
     }
-    if (error instanceof RequestCancelledError && error.completedCount > 0) {
-      throw new RequestCancelledError(error.message, error.completedCount, {
-        id: change.id,
-        reversible: change.reversible,
-      });
-    }
     throw error;
   }
 }
@@ -468,11 +458,6 @@ export function registerChangeTools(
         data: { change_id, status: 'undone', affected_count: change.affected_count },
         summary: `Undid change ${change_id} across ${change.affected_count} records.`,
         cancelled: requestCancelled(context),
-        change: {
-          id: change_id,
-          affectedCount: change.affected_count,
-          reversible: change.reversible,
-        },
       };
     },
   );

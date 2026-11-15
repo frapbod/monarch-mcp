@@ -392,7 +392,6 @@ export function registerAccountTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created manual account "${name}"; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -470,7 +469,6 @@ export function registerAccountTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Updated account ${account_id}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -507,7 +505,6 @@ export function registerAccountTools(
       return {
         data: { account_id, uploaded: true, change_id: change.id },
         summary: `Uploaded balance history for account ${account_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1, reversible: false },
       };
     },
   );
@@ -547,7 +544,6 @@ export function registerAccountTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Deleted account ${account_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1, reversible: false },
       };
     },
   );

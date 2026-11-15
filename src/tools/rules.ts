@@ -454,7 +454,6 @@ export function registerRuleTools(
         summary: `Created rule ${created.id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
         cancelled: requestCancelled(context),
         ambiguous: !exactUndo,
-        change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },
   );
@@ -538,7 +537,6 @@ export function registerRuleTools(
         summary: `Updated rule ${rule_id}${appliedCount ? ` and applied it to ${appliedCount} existing transactions` : ''}; ${exactUndo ? `undo with ${change.id}` : `change ${change.id} needs manual review: ${change.reversibility_reason}`}.`,
         cancelled: requestCancelled(context),
         ambiguous: !exactUndo,
-        change: { id: change.id, affectedCount: 1 + appliedCount, reversible: exactUndo },
       };
     },
   );
@@ -571,7 +569,6 @@ export function registerRuleTools(
       return {
         data: { deleted: true, rule_id, change_id: change.id },
         summary: `Deleted rule ${rule_id}; recreate it with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );

@@ -372,7 +372,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created transaction for ${args.merchant_name}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: account ? 2 : 1, reversible: true },
       };
     },
   );
@@ -423,7 +422,6 @@ export function registerTransactionTools(
           ? `Updated transaction ${transaction_id}; undo with ${change.id}.`
           : `Transaction ${transaction_id} could not be verified after the write; restore with ${change.id}.`,
         ambiguous: !verified,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -587,9 +585,6 @@ export function registerTransactionTools(
         summary: `Verified ${updatedCount}, ambiguous ${ambiguousCount}, failed ${failedCount}, and cancelled ${cancelledCount} of ${results.length} transaction updates${change ? `; undo attempted writes with ${change.id}` : ''}.`,
         cancelled: cancelledCount > 0 || requestCancelled(context),
         ambiguous: ambiguousCount > 0,
-        ...(change
-          ? { change: { id: change.id, affectedCount: attempted.length, reversible: true } }
-          : {}),
       };
     },
   );
@@ -625,7 +620,6 @@ export function registerTransactionTools(
       return {
         data: { deleted, transaction_id, change_id: change.id },
         summary: `Deleted transaction ${transaction_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1, reversible: false },
       };
     },
   );
@@ -681,7 +675,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Set ${splits.length} split legs on transaction ${transaction_id}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -716,7 +709,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Set ${tag_ids.length} tags on transaction ${transaction_id}; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -764,7 +756,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created transaction tag "${name}"; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -802,7 +793,6 @@ export function registerTransactionTools(
       return {
         data: { deleted: true, tag_id, change_id: change.id },
         summary: `Deleted transaction tag ${tag_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1 + affected.length, reversible: false },
       };
     },
   );
@@ -857,7 +847,6 @@ export function registerTransactionTools(
       return {
         data: { ...data, change_id: change.id },
         summary: `Created transaction category "${name}"; undo with ${change.id}.`,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
@@ -910,7 +899,6 @@ export function registerTransactionTools(
       return {
         data: { deleted, category_id, change_id: change.id },
         summary: `Deleted category ${category_id}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1 + affected.length, reversible: false },
       };
     },
   );

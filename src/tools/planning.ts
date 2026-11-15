@@ -154,7 +154,6 @@ export function registerPlanningTools(
         summary: reversible
           ? `Set budget amount to ${amount}; undo with ${change.id}.`
           : `Set this and future budget amounts to ${amount}; recorded as ${change.id} (not automatically reversible).`,
-        change: { id: change.id, affectedCount: 1, reversible },
       };
     },
   );
@@ -294,7 +293,6 @@ export function registerPlanningTools(
           ? `Updated and verified the recurring schedule for ${previous.name}; undo with ${change.id}.`
           : `The recurring update could not be verified; restore the prior schedule with ${change.id}.`,
         ambiguous: !verified,
-        change: { id: change.id, affectedCount: 1, reversible: true },
       };
     },
   );
