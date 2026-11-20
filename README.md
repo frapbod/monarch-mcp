@@ -45,7 +45,8 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `get_account_type_options` — valid types/subtypes for manual accounts
 - `get_institutions` — linked credentials and connection state
 - `get_subscription` — plan and entitlement metadata
-- `get_refresh_status` — whether a requested institution sync is still running
+- `get_refresh_status` — whether Monarch's refresh operation (or, with
+  `account_ids`, those accounts' sync) is still running
 - `refresh_accounts` — start a sync and return at once; `wait=true` blocks until the
   sync is done (up to `timeout_seconds`, default 300) and re-reads the accounts
 - `create_manual_account`, `update_account`, `delete_account`
@@ -78,11 +79,24 @@ time nor the MCP's `meta.retrieved_at` proves bank freshness. See Monarch's
 [refresh explanation](https://help.monarch.com/hc/en-us/articles/360054839131-Refreshing-Your-Accounts)
 and [pending-transaction guidance](https://help.monarch.com/hc/en-us/articles/360048393352-Connection-issues).
 
-Refreshes honor Monarch's `canBeForceRefreshed` flag; ineligible accounts are not
-requested again. `requested_account_ids` distinguishes new requests from
-accounts whose existing sync is being checked. Status polling uses the read
-client independently of the mutation, so reauthentication cannot resubmit a
-refresh or reset the remaining polling budget.
+Without `account_ids`, `refresh_accounts` does what Monarch's web "Refresh all"
+does: one `forceRefreshAllAccounts` request, which returns a refresh operation.
+`refresh_operation` reports its state and each account's state (for example
+`SKIPPED`, `REQUESTING_DATA`, `COMPLETED`, `timed_out`); `wait=true` and
+`get_refresh_status` (with `operation_id`, or the latest operation when it is
+omitted) follow that operation. Monarch refuses a new refresh shortly after
+another one with `TOO_MANY_REQUESTS` ("A force refresh has been recently
+performed"); the tool then lists the refusal in `refused` and reports Monarch's
+latest operation, if it still names one, instead of failing.
+
+With `account_ids`, the tool sends Monarch's per-account `forceRefreshAccount`
+for each selected account whose `canBeForceRefreshed` flag allows it. Monarch
+often refuses these with `TOO_MANY_REQUESTS`; each refusal is listed in
+`refused` with its account ID, while accepted requests appear in
+`requested_account_ids`. Network failures and other HTTP errors may have reached
+Monarch and stay errors, so a mutation is never replayed after an unknown
+outcome. Status polling uses the read client independently of the mutation, so
+reauthentication cannot resubmit a refresh or reset the remaining polling budget.
 
 ### Transactions
 
