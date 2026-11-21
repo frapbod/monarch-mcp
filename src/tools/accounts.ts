@@ -26,6 +26,7 @@ import {
   compactOperation,
   getLatestRefreshOperationId,
   getRefreshOperation,
+  hasAccountsSyncing,
   refusalCode,
   requestRefreshAll,
 } from '../refresh.js';
@@ -64,6 +65,12 @@ function operationSummary(operation: ReturnType<typeof compactOperation>): strin
   }).`;
 }
 
+function syncingSummary(syncing: boolean): string {
+  return `Monarch names no recent refresh operation and reports ${
+    syncing ? 'accounts still syncing' : 'no accounts syncing'
+  }.`;
+}
+
 function refreshSummary(result: {
   all: boolean;
   wait: boolean;
@@ -73,18 +80,23 @@ function refreshSummary(result: {
   requested: number;
   refused: ReadonlyArray<{ code: string; message: string }>;
   operation: ReturnType<typeof compactOperation> | null;
+  syncing: boolean | null;
 }): string {
   const refusedCodes = [...new Set(result.refused.map((item) => item.code))].join(', ');
   if (result.all) {
     const refusal = result.refused[0];
     const start = refusal
-      ? `Monarch refused a new refresh of all accounts (${refusal.code}: ${refusal.message}); ${
-          result.operation
-            ? 'reporting its latest refresh operation instead.'
-            : 'it reports no recent refresh operation.'
+      ? `Monarch refused a new refresh of all accounts (${refusal.code}: ${refusal.message})${
+          result.operation ? '; reporting its latest refresh operation instead.' : '.'
         }`
       : 'Requested a Monarch refresh of all accounts.';
-    if (!result.operation) return start;
+    if (!result.operation) {
+      if (result.syncing === null) return start;
+      const status = syncingSummary(result.syncing);
+      return result.wait && !result.complete
+        ? `${start} ${status} Syncing did not stop within ${result.timeoutSeconds} seconds.`
+        : `${start} ${status}`;
+    }
     const status = operationSummary(result.operation);
     if (!result.wait && !result.operation.complete) {
       return `${start} ${status} Poll get_refresh_status with operation_id ${result.operation.operation_id}, or pass wait=true.`;
@@ -286,7 +298,7 @@ export function registerAccountTools(
       name: 'get_refresh_status',
       title: 'Check account refresh status',
       description:
-        "Check whether Monarch reports a refresh complete. Without account_ids it reports Monarch's refresh operation (operation_id from refresh_accounts, or the latest one) with each account's state; with account_ids it reports whether those accounts still sync. Completion does not prove that the bank supplied newer data or that a balance is available to spend.",
+        "Check whether Monarch reports a refresh complete. Without account_ids it reports Monarch's refresh operation (operation_id from refresh_accounts, or the latest one) with each account's state, or, when Monarch names no operation, whether Monarch reports any account syncing; with account_ids it reports whether those accounts still sync. Completion does not prove that the bank supplied newer data or that a balance is available to spend.",
       inputSchema: z.object({
         account_ids: z.array(accountId).min(1).optional(),
         operation_id: z
@@ -320,6 +332,17 @@ export function registerAccountTools(
             summary: `${operationSummary(view)} Bank freshness is not verified.`,
           };
         }
+        const syncing = await session.read((client) => hasAccountsSyncing(client));
+        return {
+          data: {
+            complete: !syncing,
+            account_ids: null,
+            refresh_operation: null,
+            completion_scope: 'monarch_sync',
+            bank_freshness: 'unverified',
+          },
+          summary: `${syncingSummary(syncing)} Bank freshness is not verified.`,
+        };
       }
       const complete = await session.read((client) =>
         client.isAccountsRefreshComplete(account_ids),
@@ -341,7 +364,7 @@ export function registerAccountTools(
     {
       name: 'refresh_accounts',
       title: 'Refresh linked accounts',
-      description: `Request a Monarch sync and return at once with complete=null; poll get_refresh_status until the sync is done, then read the accounts. Pass wait=true to block until the sync is done or timeout_seconds passes, then re-read the accounts. Omit account_ids to refresh every account the way Monarch's "Refresh all" does: one request, tracked by refresh_operation. account_ids sends one request per account, which Monarch often refuses with TOO_MANY_REQUESTS; refused requests are listed in refused, not raised as an error. complete only reports Monarch sync completion, not newer bank data. ${balanceNotice}`,
+      description: `Request a Monarch sync and return at once with complete=null; poll get_refresh_status until the sync is done, then read the accounts. Pass wait=true to block until the sync is done or timeout_seconds passes, then re-read the accounts. Omit account_ids to refresh every account the way Monarch's "Refresh all" does: one request, tracked by refresh_operation. account_ids sends one request per account, which Monarch often refuses with TOO_MANY_REQUESTS; refused requests are listed in refused, not raised as an error, and wait=true with account_ids waits on per-account sync flags that never clear for some accounts. complete only reports Monarch sync completion, not newer bank data. ${balanceNotice}`,
       inputSchema: z.object({
         account_ids: z.array(accountId).min(1).optional(),
         wait: z.boolean().default(false),
@@ -377,6 +400,7 @@ export function registerAccountTools(
 
       let complete = false;
       let operation: ReturnType<typeof compactOperation> | null = null;
+      let syncing: boolean | null = null;
       if (!account_ids) {
         let operationId: string | null = null;
         try {
@@ -410,6 +434,18 @@ export function registerAccountTools(
         }
         operation = current ? compactOperation(current) : null;
         complete = operation?.complete ?? false;
+        if (!current) {
+          // No operation to track: wait on Monarch's household sync flag.
+          syncing = await session.read((client) => hasAccountsSyncing(client));
+          while (wait && syncing) {
+            const remaining = deadline - performance.now();
+            if (remaining <= 0) break;
+            await pause(Math.min(poll_seconds * 1000, remaining), context.mcpReq.signal);
+            throwIfCancelled(context, cancelledMessage);
+            syncing = await session.read((client) => hasAccountsSyncing(client));
+          }
+          complete = !syncing;
+        }
       } else {
         const selected = ids.map((id) => {
           const account = before.accounts.find((candidate) => candidate.id === id);
@@ -453,6 +489,7 @@ export function registerAccountTools(
           requested_account_ids: requestedIds,
           refused,
           refresh_operation: operation,
+          accounts_syncing: syncing,
           elapsed_ms: Math.round(performance.now() - startedAt),
           progress,
           accounts: after.accounts
@@ -468,6 +505,7 @@ export function registerAccountTools(
           requested: requestedIds.length,
           refused,
           operation,
+          syncing,
         })} ${balanceNotice}`,
       };
     },

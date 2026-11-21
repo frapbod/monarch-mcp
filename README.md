@@ -45,8 +45,9 @@ The image is built with `make image`; its stdio entrypoint is the server.
 - `get_account_type_options` — valid types/subtypes for manual accounts
 - `get_institutions` — linked credentials and connection state
 - `get_subscription` — plan and entitlement metadata
-- `get_refresh_status` — whether Monarch's refresh operation (or, with
-  `account_ids`, those accounts' sync) is still running
+- `get_refresh_status` — whether Monarch's refresh operation (when it names
+  none, any account sync; with `account_ids`, those accounts' sync) is still
+  running
 - `refresh_accounts` — start a sync and return at once; `wait=true` blocks until the
   sync is done (up to `timeout_seconds`, default 300) and re-reads the accounts
 - `create_manual_account`, `update_account`, `delete_account`
@@ -87,14 +88,19 @@ does: one `forceRefreshAllAccounts` request, which returns a refresh operation.
 omitted) follow that operation. Monarch refuses a new refresh shortly after
 another one with `TOO_MANY_REQUESTS` ("A force refresh has been recently
 performed"); the tool then lists the refusal in `refused` and reports Monarch's
-latest operation, if it still names one, instead of failing.
+latest operation, if it still names one, instead of failing. Monarch names its
+latest operation only for a few minutes; when it names none, both tools answer
+from Monarch's household `hasAccountsSyncing` flag (`accounts_syncing`), the
+flag the web client polls until false.
 
 With `account_ids`, the tool sends Monarch's per-account `forceRefreshAccount`
 for each selected account whose `canBeForceRefreshed` flag allows it. Monarch
 often refuses these with `TOO_MANY_REQUESTS`; each refusal is listed in
 `refused` with its account ID, while accepted requests appear in
-`requested_account_ids`. Network failures and other HTTP errors may have reached
-Monarch and stay errors, so a mutation is never replayed after an unknown
+`requested_account_ids`. Waiting and status for `account_ids` use the
+per-account `hasSyncInProgress` flags, which never clear for some accounts, so a
+wait that includes such an account ends only at its timeout. Network failures
+and other HTTP errors may have reached Monarch and stay errors, so a mutation is never replayed after an unknown
 outcome. Status polling uses the read client independently of the mutation, so
 reauthentication cannot resubmit a refresh or reset the remaining polling budget.
 

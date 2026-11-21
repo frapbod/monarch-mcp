@@ -34,6 +34,14 @@ const LATEST_OPERATION = `
   }
 `;
 
+// The household flag Monarch's web "Refresh all" polls until false. The
+// per-account hasSyncInProgress flags never clear for some accounts.
+const ACCOUNTS_SYNCING = `
+  query Common_ForceRefreshAccountsQuery {
+    hasAccountsSyncing
+  }
+`;
+
 export interface RefreshOperation {
   readonly id: string;
   readonly state: string;
@@ -120,6 +128,14 @@ export async function getLatestRefreshOperationId(client: MonarchClient): Promis
     latestForceRefreshOperation: { id: string } | null;
   }>('Common_LatestForceRefreshOperation', LATEST_OPERATION);
   return result.latestForceRefreshOperation?.id ?? null;
+}
+
+export async function hasAccountsSyncing(client: MonarchClient): Promise<boolean> {
+  const result = await graphql(client).gqlCall<{ hasAccountsSyncing: boolean | null }>(
+    'Common_ForceRefreshAccountsQuery',
+    ACCOUNTS_SYNCING,
+  );
+  return result.hasAccountsSyncing === true;
 }
 
 /** Compact operation view: counts by state plus every account ID with its state. */
