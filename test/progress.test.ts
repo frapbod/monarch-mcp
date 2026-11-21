@@ -163,39 +163,342 @@ test('retroactive rules report every snapshot, write, verification, and journal 
   });
 });
 
-test('account refresh reports upstream progress', async () => {
+type Operation = {
+  id: string;
+  state: string;
+  completedAccountCount: number;
+  totalAccountCount: number;
+  accounts: Array<{ accountId: string; state: string; timedOut: boolean; errorMessage: null }>;
+};
+
+function operation(state: string, completed: number, total = 2): Operation {
+  return {
+    id: 'operation-1',
+    state,
+    completedAccountCount: completed,
+    totalAccountCount: total,
+    accounts: Array.from({ length: total }, (_, index) => ({
+      accountId: `account-${index + 1}`,
+      state: index < completed ? 'COMPLETED' : 'REQUESTING_DATA',
+      timedOut: false,
+      errorMessage: null,
+    })),
+  };
+}
+
+// Fake of the client's GraphQL path, keyed by Monarch operation name.
+function gqlCall(handlers: Record<string, (variables: Record<string, unknown>) => unknown>) {
+  const calls: string[] = [];
+  const call = async (name: string, _query: string, variables: Record<string, unknown> = {}) => {
+    calls.push(name);
+    const handler = handlers[name];
+    if (!handler) throw new Error(`unexpected GraphQL operation ${name}`);
+    return handler(variables);
+  };
+  return { call, calls };
+}
+
+const refreshAllAccepted = () => ({
+  forceRefreshAllAccounts: { success: true, forceRefreshOperationId: 'operation-1', errors: null },
+});
+
+test('refresh of all accounts sends one Monarch request and waits for its operation', async () => {
   let reads = 0;
+  const states = [
+    operation('IN_PROGRESS', 0),
+    operation('IN_PROGRESS', 1),
+    operation('COMPLETED', 2),
+  ];
+  const gql = gqlCall({
+    Common_ForceRefreshAccountsMutation: (variables) => {
+      assert.deepEqual(variables, { input: {} });
+      return refreshAllAccepted();
+    },
+    Common_ForceRefreshOperationQuery: (variables) => {
+      assert.equal(variables.id, 'operation-1');
+      return { forceRefreshOperation: states.shift() };
+    },
+  });
   const client = {
+    gqlCall: gql.call,
     getAccounts: async () => ({
       accounts: [
         { ...account, canUseAvailableBalance: true, availableBalance: ++reads === 1 ? 20 : 7 },
       ],
       householdPreferences: {},
     }),
-    requestAccountRefresh: async () => true,
-    waitForAccountsRefresh: async (options: {
-      onProgress: (state: { completed: number; total: number; elapsedMs: number }) => void;
-    }) => {
-      options.onProgress({ completed: 1, total: 2, elapsedMs: 10 });
-      options.onProgress({ completed: 2, total: 2, elapsedMs: 20 });
-      return true;
+    requestAccountRefresh: async () => {
+      throw new Error('refresh of all accounts must not send per-account requests');
     },
   } as unknown as MonarchClient;
 
   await withClient(client, async (mcp) => {
     const progress: number[] = [];
     const result = await mcp.callTool(
-      { name: 'refresh_accounts', arguments: { wait: true } },
+      { name: 'refresh_accounts', arguments: { wait: true, poll_seconds: 1 } },
       { onprogress: ({ progress: value }) => progress.push(value) },
     );
     assert.notEqual(result.isError, true);
     assert.deepEqual(progress, [1, 2]);
+    assert.deepEqual(gql.calls, [
+      'Common_ForceRefreshAccountsMutation',
+      'Common_ForceRefreshOperationQuery',
+      'Common_ForceRefreshOperationQuery',
+      'Common_ForceRefreshOperationQuery',
+    ]);
     const { data } = result.structuredContent as {
-      data: { accounts: Array<Record<string, unknown>> };
+      data: {
+        complete: boolean;
+        refused: unknown[];
+        requested_account_ids: string[];
+        refresh_operation: { operation_id: string; account_states: Record<string, number> };
+        accounts: Array<Record<string, unknown>>;
+      };
     };
+    assert.equal(data.complete, true);
+    assert.deepEqual(data.refused, []);
+    assert.deepEqual(data.requested_account_ids, ['account-1', 'account-2']);
+    assert.equal(data.refresh_operation.operation_id, 'operation-1');
+    assert.deepEqual(data.refresh_operation.account_states, { COMPLETED: 2 });
     assert.equal(reads, 2);
     assert.equal(data.accounts[0]?.available_balance_supported, true);
     assert.equal(data.accounts[0]?.available_balance, 7);
+  });
+});
+
+test('a refused refresh of all accounts reports the refusal and the latest operation', async () => {
+  const gql = gqlCall({
+    Common_ForceRefreshAccountsMutation: () => {
+      throw new RequestFailedException('Please try again later: TOO_MANY_REQUESTS', {
+        graphQLErrors: [
+          {
+            message: 'Please try again later: TOO_MANY_REQUESTS',
+            extensions: { code: 'TOO_MANY_REQUESTS' },
+          } as { message: string },
+        ],
+      });
+    },
+    Common_LatestForceRefreshOperation: () => ({
+      latestForceRefreshOperation: { id: 'operation-1', state: 'COMPLETED' },
+    }),
+    Common_ForceRefreshOperationQuery: () => ({ forceRefreshOperation: operation('COMPLETED', 2) }),
+  });
+  const client = {
+    gqlCall: gql.call,
+    getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
+  } as unknown as MonarchClient;
+
+  await withClient(client, async (mcp) => {
+    const result = await mcp.callTool({ name: 'refresh_accounts', arguments: {} });
+    assert.notEqual(result.isError, true);
+    const { data } = result.structuredContent as {
+      data: {
+        complete: null;
+        refused: Array<{ account_id: null; code: string }>;
+        requested_account_ids: string[];
+        refresh_operation: { operation_id: string; complete: boolean };
+      };
+    };
+    assert.equal(data.complete, null);
+    assert.deepEqual(
+      data.refused.map(({ account_id, code }) => ({ account_id, code })),
+      [{ account_id: null, code: 'TOO_MANY_REQUESTS' }],
+    );
+    assert.deepEqual(data.requested_account_ids, []);
+    assert.deepEqual(
+      [data.refresh_operation.operation_id, data.refresh_operation.complete],
+      ['operation-1', true],
+    );
+    assert.match(JSON.stringify(result.content), /refused a new refresh of all accounts/);
+  });
+});
+
+test('a refresh-all refused in its payload with no operation waits on the household sync flag', async () => {
+  const syncing = [true, true, false];
+  const gql = gqlCall({
+    // The form Monarch returned live: an error payload, not a GraphQL error.
+    Common_ForceRefreshAccountsMutation: () => ({
+      forceRefreshAllAccounts: {
+        success: false,
+        forceRefreshOperationId: null,
+        errors: {
+          fieldErrors: [],
+          message: 'A force refresh has been recently performed. Please try again later.',
+          code: 'TOO_MANY_REQUESTS',
+        },
+      },
+    }),
+    Common_LatestForceRefreshOperation: () => ({ latestForceRefreshOperation: null }),
+    Common_ForceRefreshAccountsQuery: () => ({ hasAccountsSyncing: syncing.shift() }),
+  });
+  const client = {
+    gqlCall: gql.call,
+    getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
+    waitForAccountsRefresh: async () => {
+      throw new Error('refresh of all accounts must not wait on per-account sync flags');
+    },
+  } as unknown as MonarchClient;
+
+  await withClient(client, async (mcp) => {
+    const result = await mcp.callTool({
+      name: 'refresh_accounts',
+      arguments: { wait: true, poll_seconds: 1 },
+    });
+    assert.notEqual(result.isError, true);
+    const { data } = result.structuredContent as {
+      data: {
+        complete: boolean;
+        refused: Array<{ account_id: null; code: string }>;
+        refresh_operation: null;
+        accounts_syncing: boolean;
+      };
+    };
+    assert.deepEqual(
+      data.refused.map(({ account_id, code }) => ({ account_id, code })),
+      [{ account_id: null, code: 'TOO_MANY_REQUESTS' }],
+    );
+    assert.equal(data.refresh_operation, null);
+    assert.equal(data.complete, true);
+    assert.equal(data.accounts_syncing, false);
+    assert.deepEqual(gql.calls, [
+      'Common_ForceRefreshAccountsMutation',
+      'Common_LatestForceRefreshOperation',
+      'Common_ForceRefreshAccountsQuery',
+      'Common_ForceRefreshAccountsQuery',
+      'Common_ForceRefreshAccountsQuery',
+    ]);
+    assert.match(JSON.stringify(result.content), /reports no accounts syncing/);
+  });
+});
+
+test('per-account refusals are listed while accepted requests still count', async () => {
+  const second = { ...account, id: 'account-2' };
+  const requested: string[] = [];
+  const client = {
+    getAccounts: async () => ({ accounts: [account, second], householdPreferences: {} }),
+    requestAccountRefresh: async (id: string) => {
+      if (id === 'account-2') {
+        throw new RequestFailedException('Please try again later: TOO_MANY_REQUESTS', {
+          graphQLErrors: [
+            { message: 'TOO_MANY_REQUESTS', extensions: { code: 'TOO_MANY_REQUESTS' } } as {
+              message: string;
+            },
+          ],
+        });
+      }
+      requested.push(id);
+      return true;
+    },
+  } as unknown as MonarchClient;
+
+  await withClient(client, async (mcp) => {
+    const result = await mcp.callTool({
+      name: 'refresh_accounts',
+      arguments: { account_ids: ['account-1', 'account-2'] },
+    });
+    assert.notEqual(result.isError, true);
+    const { data } = result.structuredContent as {
+      data: {
+        requested_account_ids: string[];
+        refused: Array<{ account_id: string; code: string }>;
+      };
+    };
+    assert.deepEqual(requested, ['account-1']);
+    assert.deepEqual(data.requested_account_ids, ['account-1']);
+    assert.deepEqual(
+      data.refused.map(({ account_id, code }) => ({ account_id, code })),
+      [{ account_id: 'account-2', code: 'TOO_MANY_REQUESTS' }],
+    );
+    assert.match(JSON.stringify(result.content), /Monarch refused 1 \(TOO_MANY_REQUESTS\)/);
+  });
+});
+
+test('a refresh request with an unknown outcome is an error, not a refusal', async () => {
+  const client = {
+    getAccounts: async () => ({ accounts: [account], householdPreferences: {} }),
+    requestAccountRefresh: async () => {
+      throw new RequestFailedException('HTTP 502: Bad Gateway', { statusCode: 502 });
+    },
+  } as unknown as MonarchClient;
+
+  await withClient(client, async (mcp) => {
+    const result = await mcp.callTool({
+      name: 'refresh_accounts',
+      arguments: { account_ids: ['account-1'] },
+    });
+    assert.equal(result.isError, true);
+  });
+});
+
+test('refresh status without account IDs reports the latest or named operation', async () => {
+  const gql = gqlCall({
+    Common_LatestForceRefreshOperation: () => ({
+      latestForceRefreshOperation: { id: 'operation-1', state: 'IN_PROGRESS' },
+    }),
+    Common_ForceRefreshOperationQuery: (variables) => ({
+      forceRefreshOperation:
+        variables.id === 'operation-1'
+          ? operation('IN_PROGRESS', 1)
+          : variables.id === 'operation-2'
+            ? { ...operation('COMPLETED', 2), id: 'operation-2' }
+            : null,
+    }),
+  });
+  const client = {
+    gqlCall: gql.call,
+    isAccountsRefreshComplete: async () => {
+      throw new Error('operation status must not use per-account sync flags');
+    },
+  } as unknown as MonarchClient;
+
+  await withClient(client, async (mcp) => {
+    const latest = await mcp.callTool({ name: 'get_refresh_status', arguments: {} });
+    const latestData = (latest.structuredContent as { data: Record<string, unknown> }).data;
+    assert.equal(latestData.complete, false);
+    assert.equal(
+      (latestData.refresh_operation as { completed_accounts: number }).completed_accounts,
+      1,
+    );
+    const named = await mcp.callTool({
+      name: 'get_refresh_status',
+      arguments: { operation_id: 'operation-2' },
+    });
+    assert.equal((named.structuredContent as { data: { complete: boolean } }).data.complete, true);
+    const missing = await mcp.callTool({
+      name: 'get_refresh_status',
+      arguments: { operation_id: 'operation-3' },
+    });
+    assert.equal(missing.isError, true);
+  });
+});
+
+test('refresh status with no operation answers from the household sync flag', async () => {
+  let syncing = true;
+  const gql = gqlCall({
+    Common_LatestForceRefreshOperation: () => ({ latestForceRefreshOperation: null }),
+    Common_ForceRefreshAccountsQuery: () => ({ hasAccountsSyncing: syncing }),
+  });
+  const client = {
+    gqlCall: gql.call,
+    isAccountsRefreshComplete: async () => {
+      throw new Error('status without account IDs must not use per-account sync flags');
+    },
+  } as unknown as MonarchClient;
+
+  await withClient(client, async (mcp) => {
+    const running = await mcp.callTool({ name: 'get_refresh_status', arguments: {} });
+    assert.notEqual(running.isError, true);
+    assert.deepEqual((running.structuredContent as { data: unknown }).data, {
+      complete: false,
+      account_ids: null,
+      refresh_operation: null,
+      completion_scope: 'monarch_sync',
+      bank_freshness: 'unverified',
+    });
+    syncing = false;
+    const idle = await mcp.callTool({ name: 'get_refresh_status', arguments: {} });
+    assert.equal((idle.structuredContent as { data: { complete: boolean } }).data.complete, true);
+    assert.match(JSON.stringify(idle.content), /reports no accounts syncing/);
   });
 });
 
@@ -252,19 +555,17 @@ for (const complete of [true, false, null]) {
 
 test('cancelling refresh polling stops the wait after the in-flight refresh request', async () => {
   let accountReads = 0;
+  const gql = gqlCall({
+    Common_ForceRefreshAccountsMutation: refreshAllAccepted,
+    Common_ForceRefreshOperationQuery: () => ({
+      forceRefreshOperation: operation('IN_PROGRESS', 0),
+    }),
+  });
   const client = {
+    gqlCall: gql.call,
     getAccounts: async () => {
       accountReads += 1;
       return { accounts: [account], householdPreferences: {} };
-    },
-    requestAccountRefresh: async () => true,
-    waitForAccountsRefresh: async (options: {
-      onProgress: (state: { completed: number; total: number; elapsedMs: number }) => void;
-    }) => {
-      options.onProgress({ completed: 0, total: 1, elapsedMs: 0 });
-      await delay(25);
-      options.onProgress({ completed: 0, total: 1, elapsedMs: 25 });
-      return false;
     },
   } as unknown as MonarchClient;
 
@@ -278,6 +579,10 @@ test('cancelling refresh polling stops the wait after the in-flight refresh requ
     await assert.rejects(request, /AbortError/);
     await delay(50);
     assert.equal(accountReads, 1);
+    assert.deepEqual(gql.calls, [
+      'Common_ForceRefreshAccountsMutation',
+      'Common_ForceRefreshOperationQuery',
+    ]);
   });
 });
 
